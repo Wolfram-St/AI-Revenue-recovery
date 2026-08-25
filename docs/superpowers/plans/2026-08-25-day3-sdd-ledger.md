@@ -11,7 +11,9 @@ Boundary: model estimates `P(recovered | context)` only — never action-conditi
 | 2 | Deterministic policy decision + precedence + STOP dominance + residual RETRY_LATER | `4f9c1dd` | 31 | 113 / 113 | APPROVE (+1 MINOR fixed pre-commit) | n/a (approved) |
 | 3 | Opportunity scoring + Expected Recovery Value | `61f88b8` | 75 | 188 / 188 | REQUEST_CHANGES → fixed (tie-break contract truthed, rounded-key documented, mixed-label ValueError, cost-override sweep) | APPROVE |
 | 4 | Decision trace / audit record | `1fe98a7` | 55 | 243 / 243 | REQUEST_CHANGES → fixed (CRITICAL NaT acceptance, IMPORTANT unguarded entry coercion, is_stop invariant, text stripping, cross-process determinism pin) | APPROVE |
-| 5 | Engine integration | pending | — | — | — | — |
+| 5 | Engine integration (candidate rule: only worth-intervening rows reach policy; terminal no-op STOP otherwise) | `4635b84` | 20 | 263 / 263 | APPROVE (2 MINORs polished: keyword PolicyDecision, NaN-semantics docs) | n/a (approved) |
+
+Interface deviations from plan sketches (sanctioned by owner task instructions, superseding stale plan text): scoring uses `worth_intervening`/`INTERVENE` vocabulary; trace signature `(row, score, decision)` with `matched_rule_id/name`, `rule_priority`; engine summary keys `candidate_count`/`total_candidate_erv_inr`/`noop_count` with `traces: tuple[DecisionTrace, ...]`.
 | 6 | Documentation + Day 3 gate | pending | — | — | — | — |
 
 ## Standing constraints (unchanged)
