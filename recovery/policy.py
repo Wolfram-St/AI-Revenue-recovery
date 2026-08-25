@@ -11,6 +11,15 @@ else -- ``or``, calls, attributes, arithmetic, lambdas, comprehensions,
 imports, subscripts, chained comparisons -- raises ValueError naming the
 rejected construct rather than evaluating to False. Column references resolve
 via ``context[name]`` at evaluation time, so a missing column raises KeyError.
+
+Decision layer
+--------------
+``decide_action`` implements authorization, not recommendation: it consumes
+only decision-time context facts and the calibrated probability
+``P(recovered | context)``; it never sees or overrides any external AI
+recommendation because none exists at this layer. Whatever action it returns
+is the authorized action, resolved by deterministic precedence over the
+frozen rules and explained by a reason string on every decision.
 """
 
 from __future__ import annotations
@@ -24,6 +33,14 @@ import yaml
 CANONICAL_ACTIONS: frozenset[str] = frozenset(
     {"RETRY_NOW", "RETRY_LATER", "REQUEST_UPDATE", "HUMAN_REVIEW", "STOP"}
 )
+
+RESIDUAL_DEFAULT_ACTION = "RETRY_LATER"
+"""Documented placeholder authorized when no rule matches.
+
+This is the residual default until a future ERV-based NOW-vs-LATER chooser
+exists to decide between ``RETRY_NOW`` and ``RETRY_LATER`` on expected
+recovery value; it keeps the action vocabulary closed in the meantime.
+"""
 
 DEFAULT_CONFIG_PATH = "config/business_rules.yaml"
 MAX_CONDITION_LENGTH = 256
@@ -43,6 +60,18 @@ class PolicyRule:
     reason: str
     condition_ast: ast.AST
     condition_text: str
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class PolicyDecision:
+    authorized_action: str
+    matched_rule_id: str | None
+    matched_rule_name: str | None
+    priority: int | None
+    reason: str
+    is_stop: bool
+    evaluated_rules: tuple[tuple[str, bool], ...]
 
 
 @dataclass(frozen=True)
@@ -184,6 +213,8 @@ def load_policy_config(path: str | Path = DEFAULT_CONFIG_PATH) -> PolicyConfig:
     rules: list[PolicyRule] = []
     for entry in raw["rules"]:
         rule_id = entry["id"]
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            raise ValueError(f"rule id must be a non-empty string, got {rule_id!r}")
         if rule_id in seen_ids:
             raise ValueError(f"duplicate rule id: {rule_id}")
         seen_ids.add(rule_id)
@@ -196,6 +227,9 @@ def load_policy_config(path: str | Path = DEFAULT_CONFIG_PATH) -> PolicyConfig:
                 f"rule {rule_id}: action {action!r} is outside the canonical vocabulary"
             )
         condition_text = entry["condition"]
+        enabled = entry.get("enabled", True)
+        if type(enabled) is not bool:
+            raise ValueError(f"rule {rule_id}: enabled must be a boolean")
         rules.append(
             PolicyRule(
                 id=rule_id,
@@ -205,6 +239,7 @@ def load_policy_config(path: str | Path = DEFAULT_CONFIG_PATH) -> PolicyConfig:
                 reason=entry["reason"],
                 condition_ast=parse_condition(condition_text),
                 condition_text=condition_text,
+                enabled=enabled,
             )
         )
 
@@ -214,3 +249,69 @@ def load_policy_config(path: str | Path = DEFAULT_CONFIG_PATH) -> PolicyConfig:
         rules=tuple(rules),
         canonical_actions=vocabulary,
     )
+
+
+def _select_by_precedence(candidates: list[PolicyRule]) -> PolicyRule:
+    return min(candidates, key=lambda rule: (-rule.priority, rule.id))
+
+
+def decide_action(context: dict, policy: PolicyConfig) -> PolicyDecision:
+    """Authorize exactly one action for a decision-time context.
+
+    Deterministic precedence: every enabled rule is evaluated in config
+    order (a missing context column raises KeyError, never a silent False);
+    among matched rules the highest priority wins and equal priorities break
+    to the lowest rule id. When ``stop_precedence`` is set and any matched
+    rule authorizes STOP, a matched STOP rule wins even against a strictly
+    higher positive priority. If nothing matches, the residual default
+    ``RESIDUAL_DEFAULT_ACTION`` is authorized. Disabled rules are never
+    evaluated but still appear in ``evaluated_rules`` as ``(id, False)``.
+    """
+    evaluated_rules: list[tuple[str, bool]] = []
+    matched: list[PolicyRule] = []
+    for rule in policy.rules:
+        if not rule.enabled:
+            evaluated_rules.append((rule.id, False))
+            continue
+        did_match = evaluate_condition(rule.condition_ast, context)
+        evaluated_rules.append((rule.id, did_match))
+        if did_match:
+            matched.append(rule)
+
+    candidates = matched
+    if policy.stop_precedence:
+        stop_matches = [rule for rule in matched if rule.action == "STOP"]
+        if stop_matches:
+            candidates = stop_matches
+
+    if candidates:
+        winner = _select_by_precedence(candidates)
+        decision = PolicyDecision(
+            authorized_action=winner.action,
+            matched_rule_id=winner.id,
+            matched_rule_name=winner.name,
+            priority=winner.priority,
+            reason=winner.reason,
+            is_stop=winner.action == "STOP",
+            evaluated_rules=tuple(evaluated_rules),
+        )
+    else:
+        decision = PolicyDecision(
+            authorized_action=RESIDUAL_DEFAULT_ACTION,
+            matched_rule_id=None,
+            matched_rule_name=None,
+            priority=None,
+            reason=(
+                f"Residual default {RESIDUAL_DEFAULT_ACTION} applied because "
+                "no policy rule matched this case."
+            ),
+            is_stop=False,
+            evaluated_rules=tuple(evaluated_rules),
+        )
+
+    if decision.authorized_action not in CANONICAL_ACTIONS:
+        raise ValueError(
+            f"authorized action {decision.authorized_action!r} is outside the "
+            f"canonical vocabulary {sorted(CANONICAL_ACTIONS)}"
+        )
+    return decision
