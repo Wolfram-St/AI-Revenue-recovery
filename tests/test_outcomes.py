@@ -444,6 +444,7 @@ def test_empty_frame_yields_empty_result_with_correct_schema():
     assert result.index.equals(empty.index)
     assert result["simulated_recovered"].dtype == np.dtype("int8")
     for column in (
+        "simulated_recovered_amount_inr",
         "base_recovery_propensity",
         "action_effect_logit",
         "propensity_under_assignment",
@@ -532,3 +533,178 @@ def test_module_language_never_claims_causal_estimates():
     docstring = ast.get_docstring(ast.parse(source))
     assert "SYNTHETIC GROUND TRUTH" in docstring
     assert "decision-time" in docstring
+
+
+# ---------------------------------------------------------------------------
+# 10. Task 4: recovered revenue generation (full-or-zero, plan decision D3)
+# ---------------------------------------------------------------------------
+
+
+def test_result_columns_match_day4_revenue_contract_exactly(monte_carlo_run):
+    _, result = monte_carlo_run
+
+    # Literal pin, deliberately independent of RESULT_COLUMNS so constant
+    # drift fails here even if the module constant is edited in lockstep.
+    assert list(result.columns) == [
+        "simulated_recovered",
+        "simulated_recovered_amount_inr",
+        "base_recovery_propensity",
+        "action_effect_logit",
+        "propensity_under_assignment",
+    ]
+    assert list(RESULT_COLUMNS) == list(result.columns)
+    assert result["simulated_recovered"].dtype == np.dtype("int8")
+    for column in (
+        "simulated_recovered_amount_inr",
+        "base_recovery_propensity",
+        "action_effect_logit",
+        "propensity_under_assignment",
+    ):
+        assert result[column].dtype == np.dtype("float64")
+
+
+def test_unrecovered_rows_pay_exactly_zero(monte_carlo_run):
+    _, result = monte_carlo_run
+
+    unrecovered = result["simulated_recovered"].to_numpy() == 0
+    assert unrecovered.any(), "fixture must contain unrecovered rows"
+    payouts = result["simulated_recovered_amount_inr"].to_numpy()[unrecovered]
+
+    assert (payouts == 0.0).all(), "unrecovered payouts must be exactly zero"
+    assert payouts.dtype == np.dtype("float64")
+
+
+def test_recovered_rows_pay_rounded_input_amount_row_for_row(monte_carlo_run):
+    frame, result = monte_carlo_run
+
+    recovered = result["simulated_recovered"].to_numpy() == 1
+    assert recovered.any(), "fixture must contain recovered rows"
+    expected = np.round(frame["amount_inr"].to_numpy(dtype=float), 2)
+    actual = result["simulated_recovered_amount_inr"].to_numpy()
+
+    np.testing.assert_array_equal(actual[recovered], expected[recovered])
+
+
+def test_payout_bounds_hold_across_full_mc_run(monte_carlo_run):
+    frame, result = monte_carlo_run
+
+    payouts = result["simulated_recovered_amount_inr"]
+    assert payouts.notna().all(), "payouts must never be NaN"
+    values = payouts.to_numpy()
+    settled = np.round(frame["amount_inr"].to_numpy(dtype=float), 2)
+
+    assert float(values.min()) >= 0.0, "payouts must never go negative"
+    assert (payouts <= settled).all(), (
+        "some row's payout exceeds that row's own settled payable amount"
+    )
+    assert float(values.max()) <= float(settled.max()), (
+        "the global payout max exceeds the global settled-payable max"
+    )
+
+
+def test_fractional_amount_settles_to_rounded_payable():
+    # round-half-even semantics pinned ONCE, on this single example:
+    # round(1234.567, 2) is 1234.57 under Python's correctly-rounded decimal
+    # conversion AND bit-identically under numpy's scaling rounding, so the
+    # pin is honest across both implementations.
+    frame = balanced_frame(250)
+    frame["amount_inr"] = 1234.567
+
+    result = simulate_outcomes(frame, POLICY)
+
+    settled = round(1234.567, 2)
+    assert settled == 1234.57
+    recovered = result["simulated_recovered"].to_numpy() == 1
+    assert recovered.any()
+    payouts = result["simulated_recovered_amount_inr"].to_numpy()
+
+    np.testing.assert_array_equal(
+        payouts[recovered], np.full(int(recovered.sum()), settled)
+    )
+    # Invariant note: "never more than the payment" is enforced against the
+    # SETTLED (rounded) payable amount -- 1234.57 vs raw 1234.567 -- matching
+    # banking settlement practice where the 2-decimal payable is the binding
+    # obligation, not the unrounded quote.
+    assert (payouts <= settled).all()
+    np.testing.assert_array_equal(
+        payouts[~recovered], np.zeros(int((~recovered).sum()))
+    )
+
+
+def test_zero_amount_rows_yield_zero_payout_without_crash():
+    frame = balanced_frame(100)
+    frame["amount_inr"] = 0.0
+
+    result = simulate_outcomes(frame, POLICY)
+
+    assert set(result["simulated_recovered"].tolist()) <= {0, 1}
+    payouts = result["simulated_recovered_amount_inr"].to_numpy()
+    assert (payouts == 0.0).all(), (
+        "zero-amount rows pay exactly zero whether recovered or not"
+    )
+
+
+def test_revenue_column_deterministic_and_seed_sensitive():
+    frame = balanced_frame(500)
+    mutated_policy = dataclasses.replace(POLICY, master_seed=POLICY.master_seed + 1)
+
+    first = simulate_outcomes(frame, POLICY)
+    second = simulate_outcomes(frame, POLICY)
+    alternative = simulate_outcomes(frame, mutated_policy)
+
+    assert first["simulated_recovered_amount_inr"].equals(
+        second["simulated_recovered_amount_inr"]
+    ), "same inputs must reproduce byte-identical revenue"
+    assert (
+        first["simulated_recovered_amount_inr"].to_numpy()
+        != alternative["simulated_recovered_amount_inr"].to_numpy()
+    ).any(), "different master_seed must move at least one payout"
+
+
+def test_revenue_generation_adds_no_new_rng_derivation():
+    code = _source_without_docstring()
+
+    occurrences = [match.start() for match in re.finditer(r"np\.random\.default_rng", code)]
+    assert len(occurrences) == 1, (
+        "revenue generation must reuse the single spawned outcome-stream "
+        "child; exactly one default_rng derivation allowed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("amounts", "expected_fragment"),
+    [
+        pytest.param([100.0, -5.0, 200.0], "1 row(s) are negative", id="single-negative"),
+        pytest.param([-5.0, -1.0, -0.01], "3 row(s) are negative", id="multi-negative"),
+    ],
+)
+def test_negative_amounts_rejected_before_any_draw_naming_row_count(
+    amounts, expected_fragment
+):
+    # Validation precedes the seed-stream child entirely, so no rng draw can
+    # occur before the rejection; asserting type + message is sufficient.
+    frame = balanced_frame(len(amounts))
+    frame["amount_inr"] = amounts
+
+    with pytest.raises(ValueError) as excinfo:
+        simulate_outcomes(frame, POLICY)
+
+    message = str(excinfo.value)
+    assert expected_fragment in message
+    assert "amount_inr" in message
+
+
+MANDATED_PARTIAL_RECOVERY_SENTENCE = (
+    "Partial recovery is not modeled: a recovered payment returns its "
+    "full rounded amount; an unrecovered payment returns exactly zero."
+)
+
+
+def test_partial_recovery_sentence_pinned_byte_contiguous_in_source():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+
+    assert MANDATED_PARTIAL_RECOVERY_SENTENCE in source
+    assert source.count(MANDATED_PARTIAL_RECOVERY_SENTENCE) >= 2, (
+        "the mandated sentence must appear in BOTH the module docstring and "
+        "the simulate_outcomes docstring"
+    )

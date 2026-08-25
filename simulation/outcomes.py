@@ -20,6 +20,9 @@ temporal stages can never share or reorder streams. Within the child
 generator the draw order is FIXED: one vectorized uniform batch first, then
 one Gaussian logit-noise batch, then the Bernoulli comparison. Identical
 inputs and policy therefore reproduce byte-identical output.
+
+Revenue discipline (plan decision D3): recovered revenue is FULL-OR-ZERO.
+Partial recovery is not modeled: a recovered payment returns its full rounded amount; an unrecovered payment returns exactly zero.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from simulation.config import (
 
 RESULT_COLUMNS = (
     "simulated_recovered",
+    "simulated_recovered_amount_inr",
     "base_recovery_propensity",
     "action_effect_logit",
     "propensity_under_assignment",
@@ -98,6 +102,16 @@ def _reject_nan_columns(df: pd.DataFrame) -> None:
         )
 
 
+def _reject_negative_amounts(df: pd.DataFrame) -> None:
+    negative_count = int((df["amount_inr"] < 0.0).sum())
+    if negative_count:
+        raise ValueError(
+            "amount_inr must be non-negative so simulated recovered revenue "
+            f"stays bounded below by zero, but {negative_count} row(s) are "
+            "negative"
+        )
+
+
 def _reject_unknown_arms(assigned_values: np.ndarray) -> None:
     offenders = sorted(set(assigned_values.tolist()) - set(CANONICAL_ARMS))
     if offenders:
@@ -132,18 +146,26 @@ def simulate_outcomes(
       is the PRE-noise probability actually drawn against.
 
     Returns a NEW frame indexed like ``df_with_assignments`` with columns
-    exactly ``RESULT_COLUMNS``: an int8 ``simulated_recovered`` label and the
-    three float ground-truth columns rounded to 6 decimals for stability.
+    exactly ``RESULT_COLUMNS``: an int8 ``simulated_recovered`` label, a
+    float64 ``simulated_recovered_amount_inr`` revenue column, and the three
+    float ground-truth columns rounded to 6 decimals for stability.
+
+    Revenue follows plan decision D3's full-or-zero rule.
+    Partial recovery is not modeled: a recovered payment returns its full rounded amount; an unrecovered payment returns exactly zero.
+    Rounding happens on the payout side only -- recovered rows return
+    ``round(amount_inr, 2)``, so a payout never exceeds the settled payable
+    even when raw ``amount_inr`` carries more than two decimals, and payouts
+    are never negative (negative input amounts are rejected loudly).
     The input frame and policy are never mutated; identical inputs and policy
     yield byte-identical output because all randomness comes from the single
     fixed-order seed-stream child described in the module docstring.
 
     Raises ``ValueError`` naming the offending items when required columns
-    are missing, any consumed column holds NaN/None, ``assigned_action``
-    leaves the canonical arm set, ``failure_category`` leaves the canonical
-    enum, or the computed base/assignment logits leave the representable
-    synthetic range (|logit| > 30) instead of silently saturating every
-    propensity to 0 or 1.
+    are missing, any consumed column holds NaN/None, ``amount_inr`` holds a
+    negative value, ``assigned_action`` leaves the canonical arm set,
+    ``failure_category`` leaves the canonical enum, or the computed
+    base/assignment logits leave the representable synthetic range
+    (|logit| > 30) instead of silently saturating every propensity to 0 or 1.
     """
     if not isinstance(df_with_assignments, pd.DataFrame):
         raise ValueError(
@@ -151,6 +173,7 @@ def simulate_outcomes(
         )
     _reject_missing_columns(df_with_assignments)
     _reject_nan_columns(df_with_assignments)
+    _reject_negative_amounts(df_with_assignments)
 
     sigma = float(policy.noise_sigma_logit)
     if not math.isfinite(sigma) or sigma <= 0.0:
@@ -239,10 +262,21 @@ def simulate_outcomes(
     logit_noise = outcome_rng.normal(0.0, sigma, n_rows)
     recovered = (uniforms < _sigmoid(assignment_logits + logit_noise)).astype(np.int8)
 
+    # Full-or-zero revenue (plan decision D3). Rounding happens on the PAYOUT
+    # side only: the settled payable is round(amount_inr, 2), recovered rows
+    # return exactly that amount, and unrecovered rows return exactly zero --
+    # so a payout can never exceed the settled payable even when raw
+    # amount_inr carries more than two decimals.
+    settled_amounts = np.round(amount_inr, 2)
+    payouts = np.where(recovered == 1, settled_amounts, 0.0)
+
     return pd.DataFrame(
         {
             "simulated_recovered": pd.Series(
                 recovered, index=df_with_assignments.index, dtype="int8"
+            ),
+            "simulated_recovered_amount_inr": pd.Series(
+                payouts, index=df_with_assignments.index, dtype="float64"
             ),
             "base_recovery_propensity": pd.Series(
                 np.round(base_recovery_propensity, _PROPENSITY_DECIMALS),
