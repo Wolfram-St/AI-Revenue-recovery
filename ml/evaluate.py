@@ -23,7 +23,11 @@ def evaluate_predictions(
     probabilities: np.ndarray,
     amounts: np.ndarray,
 ) -> dict[str, float]:
-    """Return ROC-AUC, PR-AUC, and Brier score for predicted probabilities."""
+    """Return ROC-AUC, PR-AUC, and Brier score for predicted probabilities.
+
+    ``amounts`` is accepted to keep the frozen Day 2 interface stable for
+    amount-aware reporting elsewhere; AUC and Brier math is amount-independent.
+    """
     y_true = np.asarray(y_true)
     probabilities = np.asarray(probabilities)
 

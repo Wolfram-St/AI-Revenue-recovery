@@ -41,3 +41,12 @@ def test_split_rejects_invalid_fractions():
         pass
     else:
         raise AssertionError("expected ValueError for fractions summing above 1.0")
+
+def test_split_requires_timestamp_column():
+    df = generate_dataset(20, seed=5).drop(columns=["event_timestamp"])
+    try:
+        chronological_split(df)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError when event_timestamp is missing")

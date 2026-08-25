@@ -54,6 +54,8 @@ def train_baseline(
     seed: int = 42,
 ) -> tuple[Pipeline, dict[str, object]]:
     """Fit the baseline on training data only and return it with metadata."""
+    if train_df[LABEL_COLUMNS[0]].nunique() < 2:
+        raise ValueError("training data must contain both classes of 'recovered'")
     X_train, y_train = build_feature_matrix(train_df)
     model = _build_pipeline(seed)
     model.fit(X_train, y_train)

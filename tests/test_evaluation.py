@@ -86,3 +86,14 @@ def test_calibration_comparison_beats_or_matches_uncalibrated_brier_on_average()
         y_test.to_numpy(), calibrated.predict_proba(X_test)[:, 1], test["amount_inr"].to_numpy()
     )["brier_score"]
     assert calibrated_brier <= raw_brier + 0.01
+
+def test_calibration_does_not_modify_base_pipeline():
+    train, validation, test = chronological_split(generate_dataset(400, seed=42))
+    model, _ = train_baseline(train, validation, seed=42)
+    probe_before = predict_recovery_probability(model, test)
+    importances_before = model.named_steps["classifier"].feature_importances_.copy()
+    calibrate_model(model, validation)
+    np.testing.assert_array_equal(probe_before, predict_recovery_probability(model, test))
+    np.testing.assert_array_equal(
+        importances_before, model.named_steps["classifier"].feature_importances_
+    )

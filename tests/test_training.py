@@ -32,3 +32,13 @@ def test_metadata_records_training_context():
     assert metadata["validation_rows"] == len(validation)
     assert metadata["positive_class_rate"] == train["recovered"].mean()
     assert len(metadata["feature_names"]) == 14
+
+def test_training_rejects_single_class_training_data():
+    train, validation, _ = chronological_split(generate_dataset(300, seed=42))
+    single_class_train = train[train["recovered"] == 0]
+    try:
+        train_baseline(single_class_train, validation, seed=42)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for single-class training data")

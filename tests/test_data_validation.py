@@ -71,3 +71,17 @@ def test_validation_reports_class_balance():
     assert balance[0] > 0
     assert balance[1] > 0
     assert balance[0] + balance[1] == 500
+
+def test_validation_rejects_empty_dataset():
+    df = generate_dataset(50, seed=42).iloc[0:0]
+    report = validate_dataset(df)
+    assert report["valid"] is False
+    assert any("empty" in violation for violation in report["violations"])
+
+
+def test_validation_reports_timestamp_dtype_violation_separately():
+    df = generate_dataset(50, seed=42)
+    df["event_timestamp"] = df["event_timestamp"].astype(str)
+    report = validate_dataset(df)
+    assert report["valid"] is False
+    assert any("datetime" in violation for violation in report["violations"])

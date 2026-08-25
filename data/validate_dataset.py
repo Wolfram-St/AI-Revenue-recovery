@@ -23,6 +23,9 @@ def validate_dataset(df: pd.DataFrame) -> dict[str, object]:
     violations: list[str] = []
     column_count = int(df.shape[1])
 
+    if df.empty:
+        violations.append("dataset is empty: contract requires at least one row")
+
     if list(df.columns) != list(EXPECTED_COLUMNS):
         violations.append(
             "column contract violated: expected "
@@ -60,13 +63,18 @@ def validate_dataset(df: pd.DataFrame) -> dict[str, object]:
         violations.append("label column missing: recovered")
         label_binary = False
 
-    timestamp_monotonic_increasing = bool(
-        "event_timestamp" in df.columns
-        and pd.api.types.is_datetime64_any_dtype(df["event_timestamp"])
-        and df["event_timestamp"].is_monotonic_increasing
-    )
-    if "event_timestamp" in df.columns and not timestamp_monotonic_increasing:
-        violations.append("event_timestamp must be nondecreasing")
+    timestamp_monotonic_increasing = False
+    if "event_timestamp" in df.columns:
+        event_time = df["event_timestamp"]
+        if not pd.api.types.is_datetime64_any_dtype(event_time):
+            violations.append(
+                "event_timestamp dtype is not datetime64: "
+                f"found {event_time.dtype}"
+            )
+        else:
+            timestamp_monotonic_increasing = bool(event_time.is_monotonic_increasing)
+            if not timestamp_monotonic_increasing and not df.empty:
+                violations.append("event_timestamp must be nondecreasing")
 
     if "failure_category" in df.columns:
         unknown_categories = set(pd.unique(df["failure_category"])) - set(ALLOWED_FAILURE_CATEGORIES)

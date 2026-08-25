@@ -21,6 +21,8 @@ def chronological_split(
         raise ValueError("split fractions must be strictly between 0 and 1")
     if train_fraction + validation_fraction >= 1:
         raise ValueError("train and validation fractions must leave room for test")
+    if TIME_COLUMN not in df.columns:
+        raise ValueError(f"chronological_split requires the {TIME_COLUMN} column")
 
     ordered = df.sort_values(TIME_COLUMN, kind="stable").reset_index(drop=True)
     train_end = int(len(ordered) * train_fraction)
