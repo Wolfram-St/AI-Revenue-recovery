@@ -1,30 +1,41 @@
 {
   "dataset": "payment_attempts",
-  "version": "1.0",
+  "version": "1.1",
   "synthetic": true,
   "target_rows": 5000,
-  "columns": [
-    {"name":"attempt_id","type":"string","role":"identifier"},
-    {"name":"payment_id","type":"string","role":"identifier"},
-    {"name":"customer_id","type":"string","role":"identifier"},
-    {"name":"amount_inr","type":"float","role":"feature"},
-    {"name":"payment_method","type":"category","role":"feature"},
-    {"name":"attempt_number","type":"integer","role":"feature"},
-    {"name":"customer_tenure_days","type":"integer","role":"feature"},
-    {"name":"successful_payment_count","type":"integer","role":"feature"},
-    {"name":"failed_payment_count","type":"integer","role":"feature"},
-    {"name":"historical_recovery_count","type":"integer","role":"feature"},
-    {"name":"customer_opted_out","type":"boolean","role":"feature"},
-    {"name":"failure_code","type":"category","role":"feature"},
-    {"name":"failure_category","type":"category","role":"feature"},
-    {"name":"issuer_response","type":"category","role":"feature"},
-    {"name":"device_type","type":"category","role":"feature"},
-    {"name":"country","type":"category","role":"feature"},
-    {"name":"fraud_risk","type":"boolean","role":"feature"},
-    {"name":"recovered","type":"boolean","role":"label"}
+  "semantics": {
+    "decision_time": "Immediately after the failed payment attempt and before any recovery intervention.",
+    "point_in_time_features": true,
+    "customer_history_snapshot": "Only events known before the current attempt may contribute to historical aggregates."
+  },
+  "feature_columns": [
+    "attempt_id", "payment_id", "customer_id", "amount_inr", "payment_method",
+    "attempt_number", "customer_tenure_days", "successful_payment_count",
+    "failed_payment_count", "historical_recovery_count", "customer_opted_out",
+    "failure_code", "failure_category", "issuer_response", "device_type",
+    "country", "fraud_risk"
   ],
-  "post_intervention_fields": [
-    "recovered",
+  "label_columns": [
+    "recovered"
+  ],
+  "outcome_columns": [
     "recovery_time_hours"
-  ]
+  ],
+  "action_aware_columns_reserved_for_optimizer": [
+    "recovery_action",
+    "action_outcome",
+    "recovered_amount_inr"
+  ],
+  "failure_categories": [
+    "temporary_decline",
+    "hard_decline",
+    "payment_method_issue",
+    "authentication_required",
+    "unknown"
+  ],
+  "leakage_policy": {
+    "features_must_be_known_at_decision_time": true,
+    "label_is_not_a_feature": true,
+    "post_intervention_outcomes_are_not_features": true
+  }
 }
