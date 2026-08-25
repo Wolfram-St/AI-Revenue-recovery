@@ -14,7 +14,7 @@ Boundary: model estimates `P(recovered | context)` only — never action-conditi
 | 5 | Additive D5 dataset contract + validator + leakage-guard tests | `2ba47a2` | 43 | 415 / 415 | REQUEST_CHANGES → fixed | APPROVE |
 | 6 | Temporal timeline stamping (arm delays, control-null rule, spawn-child 2) | `30c1d72` | 26 | 441 / 441 | APPROVE (+polish) | n/a (approved) |
 | 7 | Labeled reporting utilities (SIMULATED GROUND TRUTH vs OBSERVED SIMULATED OUTCOME) | `8ec00b2` | 21 | 462 / 462 | APPROVE (+polish) | n/a (approved) |
-| 8 | Documentation + Day 4 gate (DAY4.md, DAY4_RESULTS.md, this ledger; canonical-run capture) | pending (this change) | — | 462 / 462 (fresh tails in DAY4_RESULTS.md) | — | — |
+| 8 | Documentation + Day 4 gate (DAY4.md, DAY4_RESULTS.md, this ledger; canonical-run capture) | `ef86b46` | — | 462 / 462 (fresh tails in DAY4_RESULTS.md) | APPROVE — all headline numbers independently reproduced by reviewer's own rerun | n/a (approved) |
 
 Focused-test counts are per-suite fresh collections: `test_treatment_config.py` 48 ·
 `test_treatment_assignment.py` 29 · `test_outcomes.py` 32 ·
