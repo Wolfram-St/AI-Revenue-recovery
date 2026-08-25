@@ -4,15 +4,15 @@ This protocol is frozen before Day 2 model training.
 
 ## 1. Dataset split
 
-Use a time-ordered split whenever a real event timestamp is available:
+Use the synthetic `event_timestamp` for a strict chronological split:
 
 - Train: earliest 70%
 - Validation: next 15%
 - Test: latest 15%
 
-Do not randomly mix future observations into the training set.
+Never randomly mix future observations into training.
 
-For the synthetic Day 1 dataset, the generator does not yet expose a timestamp column in the 18-column ML contract. Day 2 must add a deterministic event-time field before final model evaluation, or generate a separate ordered evaluation fixture. Do not claim a temporal split until that field exists.
+`event_timestamp` is evaluation metadata, not a predictive feature by default.
 
 ## 2. Model diagnostics
 
