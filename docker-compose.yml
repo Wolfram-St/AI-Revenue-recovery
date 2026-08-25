@@ -1,0 +1,36 @@
+services:
+  app:
+    build: .
+    image: recoverai-app
+    environment:
+      DATABASE_URL: postgresql://recoverai:recoverai@db:5432/recoverai
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: recoverai
+      POSTGRES_USER: recoverai
+      POSTGRES_PASSWORD: recoverai
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: recoverai
+      POSTGRES_PASSWORD: recoverai
+      POSTGRES_DB: recoverai
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recoverai -d recoverai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

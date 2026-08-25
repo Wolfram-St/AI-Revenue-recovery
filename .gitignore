@@ -1,0 +1,11 @@
+# Generated dataset - reproducible via data/generate_dataset.py
+data/payment_attempts.csv
+
+# Python artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Secrets
+.env

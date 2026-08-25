@@ -1,0 +1,10 @@
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/*.csv
+.env
+.env.*
+*.md
+!README.md
