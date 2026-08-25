@@ -1,0 +1,30 @@
+{
+  "dataset": "payment_attempts",
+  "version": "1.0",
+  "synthetic": true,
+  "target_rows": 5000,
+  "columns": [
+    {"name":"attempt_id","type":"string","role":"identifier"},
+    {"name":"payment_id","type":"string","role":"identifier"},
+    {"name":"customer_id","type":"string","role":"identifier"},
+    {"name":"amount_inr","type":"float","role":"feature"},
+    {"name":"payment_method","type":"category","role":"feature"},
+    {"name":"attempt_number","type":"integer","role":"feature"},
+    {"name":"customer_tenure_days","type":"integer","role":"feature"},
+    {"name":"successful_payment_count","type":"integer","role":"feature"},
+    {"name":"failed_payment_count","type":"integer","role":"feature"},
+    {"name":"historical_recovery_count","type":"integer","role":"feature"},
+    {"name":"customer_opted_out","type":"boolean","role":"feature"},
+    {"name":"failure_code","type":"category","role":"feature"},
+    {"name":"failure_category","type":"category","role":"feature"},
+    {"name":"issuer_response","type":"category","role":"feature"},
+    {"name":"device_type","type":"category","role":"feature"},
+    {"name":"country","type":"category","role":"feature"},
+    {"name":"fraud_risk","type":"boolean","role":"feature"},
+    {"name":"recovered","type":"boolean","role":"label"}
+  ],
+  "post_intervention_fields": [
+    "recovered",
+    "recovery_time_hours"
+  ]
+}
