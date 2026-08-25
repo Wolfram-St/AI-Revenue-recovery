@@ -366,6 +366,9 @@ def load_treatment_policy(path: str | Path = DEFAULT_POLICY_PATH) -> TreatmentPo
 
     An empty interactions list is valid (a no-interaction synthetic world);
     the shipped configuration ships exactly the two documented terms.
+    Within ``arm_probabilities``, CONTROL may be 0.0 — an eligible pool with
+    no randomized controls; positivity within the eligible stratum then holds
+    only for treated arms.
     """
     raw_document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     raw = _require_mapping(raw_document, f"treatment policy document {str(path)!r}")

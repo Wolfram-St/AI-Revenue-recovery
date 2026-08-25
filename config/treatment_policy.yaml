@@ -15,6 +15,7 @@ master_seed: 20260826           # single source for all streams via Generator.sp
 arm_probabilities:              # stage-2 randomized arms among policy-eligible rows; must sum to 1.0
   # ILLUSTRATIVE SYNTHETIC split chosen so every eligible row keeps positive
   # probability for every arm (overlap by construction). Not from real data.
+  # CONTROL may be 0.0: an eligible pool with no randomized controls; positivity within the eligible stratum then holds only for treated arms.
   CONTROL: 0.20
   RETRY_NOW: 0.30
   RETRY_LATER: 0.25
