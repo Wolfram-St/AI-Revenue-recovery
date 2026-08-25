@@ -14,9 +14,9 @@ Boundary: model estimates `P(recovered | context)` only — never action-conditi
 | 5 | Engine integration (candidate rule: only worth-intervening rows reach policy; terminal no-op STOP otherwise) | `4635b84` | 20 | 263 / 263 | APPROVE (2 MINORs polished: keyword PolicyDecision, NaN-semantics docs) | n/a (approved) |
 
 Interface deviations from plan sketches (sanctioned by owner task instructions, superseding stale plan text): scoring uses `worth_intervening`/`INTERVENE` vocabulary; trace signature `(row, score, decision)` with `matched_rule_id/name`, `rule_priority`; engine summary keys `candidate_count`/`total_candidate_erv_inr`/`noop_count` with `traces: tuple[DecisionTrace, ...]`.
-| 6 | Documentation + Day 3 gate (DAY3.md, DAY3_RESULTS.md, GO for Day 4) | `c93a3c9` | — | 263 / 263 | REQUEST_CHANGES → fixed (CRITICAL off-by-one top-5 attempt_ids from 0-based index derivation; NaN-docstring precision) | APPROVE pending final gate |
+| 6 | Documentation + Day 3 gate (DAY3.md, DAY3_RESULTS.md, GO for Day 4) | `c93a3c9` | — | 263 / 263 | REQUEST_CHANGES → fixed (CRITICAL off-by-one top-5 attempt_ids from 0-based index derivation; NaN-docstring precision) | APPROVE |
 
-All six tasks complete. Final whole-branch review gate follows before DAY 3 = GO.
+**FINAL WHOLE-BRANCH REVIEW: APPROVE → DAY 3 = GO** (all 11 dimensions pass: architecture, policy safety, math, semantics/temporal integrity, auditability, security, determinism, tests, Docker reproducibility, scope compliance, documentation accuracy; zero CRITICAL/IMPORTANT findings; deferred NOTEs recorded).
 
 ## Standing constraints (unchanged)
 - No LangGraph / API / frontend / DB writes / autonomous execution / uplift-bandit-causal machinery.
