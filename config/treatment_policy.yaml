@@ -1,0 +1,79 @@
+# Synthetic treatment policy for the Day 4 simulated environment.
+#
+# THIS FILE IS DECLARATIVE DATA ONLY. Nothing here is code, nothing runs from
+# this file, and the loader accepts a closed key vocabulary with loud
+# rejections for anything unknown.
+#
+# EVERY numeric value below is an ILLUSTRATIVE SYNTHETIC choice made to make
+# the simulation world interesting and bounded. No number in this file is
+# estimated from any real provider data; they encode assumptions about a
+# fictional payments simulator, not measured field results.
+
+version: "1.0"                  # schema tag consumed by the loader; bumped on breaking changes
+master_seed: 20260826           # single source for all streams via Generator.spawn order
+
+arm_probabilities:              # stage-2 randomized arms among policy-eligible rows; must sum to 1.0
+  # ILLUSTRATIVE SYNTHETIC split chosen so every eligible row keeps positive
+  # probability for every arm (overlap by construction). Not from real data.
+  CONTROL: 0.20
+  RETRY_NOW: 0.30
+  RETRY_LATER: 0.25
+  REQUEST_UPDATE: 0.15
+  HUMAN_REVIEW: 0.10
+
+main_effects_logit:             # additive logit shift vs control for the assigned arm
+  # ILLUSTRATIVE SYNTHETIC effect sizes: meaningful but far from
+  # deterministic once noise is added. Not estimated from real data.
+  CONTROL: 0.0
+  RETRY_NOW: 0.60
+  RETRY_LATER: 0.35
+  REQUEST_UPDATE: 0.45
+  HUMAN_REVIEW: 0.25
+
+interactions_logit:             # exactly the two shipped shapes; closed enum enforced by loader
+  # ILLUSTRATIVE SYNTHETIC interaction strengths; the loader only accepts
+  # these two column/shape combinations, never user-supplied expressions.
+  - action: RETRY_NOW
+    column: failure_category
+    equals_value: temporary_decline
+    effect_logit: 0.40          # immediate retry works best on transient failures
+  - action: RETRY_LATER
+    column: attempt_number
+    min_threshold: 3
+    effect_logit: -0.25         # late-stage fatigue
+
+noise_sigma_logit: 0.5          # std-dev of Gaussian logit noise; ILLUSTRATIVE SYNTHETIC choice
+
+treatment_delay_hours:          # failure -> treatment latency per treated arm
+  # ILLUSTRATIVE SYNTHETIC operational latencies (15 min / 2 h / 4 h / 24 h);
+  # not measured from any real provider workflow.
+  RETRY_NOW: 0.25
+  REQUEST_UPDATE: 2.0
+  HUMAN_REVIEW: 4.0
+  RETRY_LATER: 24.0
+
+# ILLUSTRATIVE SYNTHETIC resolution horizon: the outcome timestamp lands
+# uniformly 1-48 h after the intervention (or after failure for controls);
+# these bounds also fix the control observation horizon. Not measured from
+# any real provider data.
+resolution_window_hours: [1.0, 48.0]    # uniform draw bound; also used for control observation horizon
+
+base_propensity_terms:          # FIXED transform names implemented in code; numbers are data here
+  # ILLUSTRATIVE SYNTHETIC base recovery propensity mirroring the Day 1
+  # generator family so propensities land in a realistic band. The transform
+  # names are fixed code; every coefficient is a synthetic data choice, not
+  # an estimate from real provider outcomes.
+  intercept: -0.35
+  category_effects:             # per failure_category additive logit (mirrors Day 1 family)
+    temporary_decline: 0.95
+    payment_method_issue: 0.25
+    authentication_required: 0.05
+    unknown: -0.15
+    hard_decline: -1.45
+  successful_payment_count_log1p: 0.11
+  historical_recovery_count_min5: 0.16
+  attempt_number_prior_offset: -0.28     # applied to max(attempt_number-1, 0)
+  fraud_risk: -0.22
+  amount_log1p_per_k: -0.10              # applied to log1p(amount_inr/1000)
+  method_upi: 0.12
+  device_android: 0.10
