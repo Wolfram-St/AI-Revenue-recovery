@@ -1,14 +1,17 @@
-# Day 1 Dataset Contract
+# Day 1 / Day 1.5 Dataset Contract
 
-The canonical Day 1 dataset is a synthetic payment-attempt dataset for development and evaluation.
+The canonical dataset is a synthetic payment-attempt dataset for development, evaluation, and end-to-end recovery simulation.
 
 ## Contract
 
 - Target rows: 5,000
-- Columns: 18
+- Columns: 19
 - Currency: INR
 - Data source: synthetic only
-- Intended use: ML experimentation and end-to-end recovery simulation
+- `event_timestamp`: ordered synthetic metadata used for temporal evaluation
+- Predictive features: decision-time information only
+- Label: `recovered`
+- Post-intervention outcome fields are not predictive features
 
 ## Required feature groups
 
@@ -16,15 +19,7 @@ The canonical Day 1 dataset is a synthetic payment-attempt dataset for developme
 - payment/attempt identifiers
 - amount
 - payment method
-- timestamp
 - attempt number
-
-### Failure context
-- failure code
-- failure category
-- issuer response
-- hard-decline indicator
-- fraud-risk indicator
 
 ### Customer history
 - tenure
@@ -33,18 +28,34 @@ The canonical Day 1 dataset is a synthetic payment-attempt dataset for developme
 - historical recoveries
 - opt-out state
 
+Historical aggregates are point-in-time snapshots. They must exclude events after the current failed attempt.
+
+### Failure context
+- failure code
+- failure category
+- issuer response
+- fraud-risk indicator
+
 ### Environment
 - device type
 - country
 
+### Evaluation metadata
+- ordered `event_timestamp`
+
+`event_timestamp` is used to create chronological train/validation/test splits and is not automatically used as a model feature.
+
 ### Outcome
-- recovery indicator
-- recovery latency
+- recovery indicator (`recovered`)
+- recovery latency is an outcome-only field reserved for later evaluation
 
 ## Leakage rule
-Outcome fields describe what happened after an intervention and cannot be used as features when training a model that makes the original recovery decision.
+Outcome fields describe what happened after an intervention and cannot be used as features when training the original recovery decision.
 
-For Day 2, the training pipeline must create a decision-time feature set first, then attach the outcome label separately.
+For Day 2, the training pipeline must construct the decision-time feature matrix first, then attach the recovery label separately.
+
+## Synthetic-data realism rule
+The outcome generator intentionally uses noisy latent probabilities and feature interactions. Policy rules must not be copied directly into the label-generation logic.
 
 ## Failure categories
 
