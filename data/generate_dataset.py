@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 
 DATASET_ROWS = 5000
-DATASET_COLUMNS = 18
+DATASET_COLUMNS = 19
+TIME_COLUMN = "event_timestamp"
 FEATURE_COLUMNS = [
     "attempt_id", "payment_id", "customer_id", "amount_inr", "payment_method",
     "attempt_number", "customer_tenure_days", "successful_payment_count",
@@ -36,6 +37,7 @@ def dataset_contract() -> dict[str, object]:
     return {
         "rows": DATASET_ROWS,
         "columns": DATASET_COLUMNS,
+        "metadata": [TIME_COLUMN],
         "features": FEATURE_COLUMNS.copy(),
         "labels": LABEL_COLUMNS.copy(),
         "outcomes": OUTCOME_COLUMNS.copy(),
@@ -49,7 +51,7 @@ def _sigmoid(value: np.ndarray) -> np.ndarray:
 
 
 def generate_dataset(n_rows: int = DATASET_ROWS, seed: int = 42) -> pd.DataFrame:
-    """Return decision-time features and the recovery label."""
+    """Return decision-time features, event time, and the recovery label."""
     if n_rows <= 0:
         raise ValueError("n_rows must be positive")
 
@@ -57,6 +59,7 @@ def generate_dataset(n_rows: int = DATASET_ROWS, seed: int = 42) -> pd.DataFrame
     customer_ids = np.array([f"CUS-{idx:04d}" for idx in rng.integers(1, 1001, n_rows)])
     payment_ids = np.array([f"PAY-{idx:06d}" for idx in range(1, n_rows + 1)])
     attempt_ids = np.array([f"ATT-{idx:06d}" for idx in range(1, n_rows + 1)])
+    event_timestamp = pd.date_range("2026-01-01T00:00:00Z", periods=n_rows, freq="15min")
 
     # All customer-history fields are sampled before the current attempt.
     tenure = rng.integers(30, 1501, n_rows)
@@ -109,6 +112,7 @@ def generate_dataset(n_rows: int = DATASET_ROWS, seed: int = 42) -> pd.DataFrame
             "attempt_id": attempt_ids,
             "payment_id": payment_ids,
             "customer_id": customer_ids,
+            "event_timestamp": event_timestamp,
             "amount_inr": amount,
             "payment_method": methods,
             "attempt_number": attempt_number,
@@ -125,7 +129,7 @@ def generate_dataset(n_rows: int = DATASET_ROWS, seed: int = 42) -> pd.DataFrame
             "fraud_risk": fraud_risk,
             "recovered": recovered,
         },
-        columns=FEATURE_COLUMNS + LABEL_COLUMNS,
+        columns=["attempt_id", "payment_id", "customer_id", TIME_COLUMN] + FEATURE_COLUMNS[3:] + LABEL_COLUMNS,
     )
 
 
