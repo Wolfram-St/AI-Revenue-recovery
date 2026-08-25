@@ -25,6 +25,13 @@ Canonical-run verification recorded in `docs/DAY4_RESULTS.md`: 0 temporal-orderi
 violations · 0 amount-bounds violations · validator valid · leakage guard clean ·
 byte-identical determinism rerun under master_seed 20260826.
 
+## Final gate
+
+**FINAL WHOLE-BRANCH REVIEW: APPROVE — DAY 4 = GO** (15/15 dimensions pass; 0 CRITICAL /
+0 IMPORTANT; 3 MINOR hardening follow-ups deferred to Day 5: mixed-type offender sort
+guard in the dataset validator, redundant finiteness-check consolidation in outcomes,
+timeline_df slice documentation for build_treatment_dataset).
+
 ## Standing constraints (unchanged)
 - No uplift/causal/bandit/RL/LangGraph/API/frontend/dashboard/database/execution code.
 - The Day 2 baseline remains exactly `P(recovered | context)`; no new field can enter its feature matrix.
