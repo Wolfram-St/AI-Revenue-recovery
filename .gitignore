@@ -9,3 +9,6 @@ __pycache__/
 
 # Secrets
 .env
+
+# Isolated feature worktrees
+.worktrees/
