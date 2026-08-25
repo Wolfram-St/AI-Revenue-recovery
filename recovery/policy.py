@@ -19,7 +19,10 @@ only decision-time context facts and the calibrated probability
 ``P(recovered | context)``; it never sees or overrides any external AI
 recommendation because none exists at this layer. Whatever action it returns
 is the authorized action, resolved by deterministic precedence over the
-frozen rules and explained by a reason string on every decision.
+frozen rules and explained by a reason string on every decision. A condition
+referencing a column whose value is NaN compares False silently (NaN !=
+anything); only entirely MISSING columns raise KeyError — validate upstream
+if NaN must be treated as a stop.
 """
 
 from __future__ import annotations
