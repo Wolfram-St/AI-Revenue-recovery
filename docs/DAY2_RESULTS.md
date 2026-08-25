@@ -57,7 +57,7 @@ lower recall).
 
 ## Verification evidence
 
-- Full suite: 33 passed locally and in Docker (`docker compose run --rm app python -m pytest -q`).
+- Full suite: 38 passed locally and in Docker (`docker compose run --rm app python -m pytest -q`).
 - Feature-contract test confirms forbidden columns absent from the model input.
 - Dataset regeneration check recorded in the Day 2 gate report.
 
