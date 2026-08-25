@@ -60,3 +60,19 @@ lower recall).
 - Full suite: 33 passed locally and in Docker (`docker compose run --rm app python -m pytest -q`).
 - Feature-contract test confirms forbidden columns absent from the model input.
 - Dataset regeneration check recorded in the Day 2 gate report.
+
+## Day 2 gate: **GO**
+
+| Gate check | Evidence | Result |
+| --- | --- | --- |
+| Dataset valid | regenerated from seed 42 inside container: 5,000 rows × 19 columns, `valid: True` | PASS |
+| Chronological split | 3,500 / 750 / 750 with strict time-ordering tests | PASS |
+| Feature pipeline leakage-safe | container run confirms forbidden columns absent; preprocessing fitted on train only | PASS |
+| Baseline trains reproducibly | same-seed predictions identical (unit-tested); full suite green in Docker | PASS |
+| Calibration acceptable | Brier 0.2440 → 0.2331 on held-out test | PASS |
+| Business metrics calculated | thresholded-simulation revenue table above, labeled non-causal | PASS |
+
+**GO for intervention-aware work**: policy engine, opportunity scoring by
+expected recovered value, and controlled workflow may proceed. Action-specific
+probabilities still require action-assigned observations or a documented
+simulated treatment policy — that boundary is unchanged.
