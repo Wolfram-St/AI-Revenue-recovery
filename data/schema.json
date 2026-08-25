@@ -1,13 +1,18 @@
 {
   "dataset": "payment_attempts",
-  "version": "1.1",
+  "version": "1.2",
   "synthetic": true,
   "target_rows": 5000,
+  "column_count": 19,
   "semantics": {
     "decision_time": "Immediately after the failed payment attempt and before any recovery intervention.",
     "point_in_time_features": true,
-    "customer_history_snapshot": "Only events known before the current attempt may contribute to historical aggregates."
+    "customer_history_snapshot": "Only events known before the current attempt may contribute to historical aggregates.",
+    "event_timestamp": "Synthetic ordered event time used only for temporal evaluation and future point-in-time feature construction."
   },
+  "metadata_columns": [
+    "event_timestamp"
+  ],
   "feature_columns": [
     "attempt_id", "payment_id", "customer_id", "amount_inr", "payment_method",
     "attempt_number", "customer_tenure_days", "successful_payment_count",
@@ -35,6 +40,7 @@
   ],
   "leakage_policy": {
     "features_must_be_known_at_decision_time": true,
+    "metadata_must_not_be_used_as_a_predictive_feature_without_justification": true,
     "label_is_not_a_feature": true,
     "post_intervention_outcomes_are_not_features": true
   }
