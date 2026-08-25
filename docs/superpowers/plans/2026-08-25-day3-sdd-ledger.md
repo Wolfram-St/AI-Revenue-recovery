@@ -10,7 +10,7 @@ Boundary: model estimates `P(recovered | context)` only — never action-conditi
 | 1 | Policy config loader + restricted AST condition parser/evaluator | `10a416e` | 44 | 82 / 82 | REQUEST_CHANGES → fixed | APPROVE |
 | 2 | Deterministic policy decision + precedence + STOP dominance + residual RETRY_LATER | `4f9c1dd` | 31 | 113 / 113 | APPROVE (+1 MINOR fixed pre-commit) | n/a (approved) |
 | 3 | Opportunity scoring + Expected Recovery Value | `61f88b8` | 75 | 188 / 188 | REQUEST_CHANGES → fixed (tie-break contract truthed, rounded-key documented, mixed-label ValueError, cost-override sweep) | APPROVE |
-| 4 | Decision trace / audit record | pending | — | — | — | — |
+| 4 | Decision trace / audit record | `1fe98a7` | 55 | 243 / 243 | REQUEST_CHANGES → fixed (CRITICAL NaT acceptance, IMPORTANT unguarded entry coercion, is_stop invariant, text stripping, cross-process determinism pin) | APPROVE |
 | 5 | Engine integration | pending | — | — | — | — |
 | 6 | Documentation + Day 3 gate | pending | — | — | — | — |
 
