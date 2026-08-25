@@ -1,6 +1,17 @@
-version: "1.0"
+version: "1.1"
 project: "RecoverAI"
 principle: "AI recommends; policy engine authorizes."
+rule_resolution:
+  matching_rule: "highest_priority_wins"
+  stop_precedence: true
+  deterministic: true
+
+action_vocabulary:
+  - RETRY_NOW
+  - RETRY_LATER
+  - REQUEST_UPDATE
+  - HUMAN_REVIEW
+  - STOP
 
 rules:
   - id: R001
@@ -27,9 +38,9 @@ rules:
   - id: R004
     name: retry_limit
     priority: 85
-    condition: "retry_count >= 3"
+    condition: "attempt_number >= 4"
     action: STOP
-    reason: "Maximum automated retry count reached."
+    reason: "Maximum automated recovery attempts reached."
 
   - id: R005
     name: payment_method_update
@@ -41,15 +52,15 @@ rules:
   - id: R006
     name: high_value_uncertain
     priority: 75
-    condition: "amount > 25000 and recovery_probability < 0.70"
+    condition: "amount_inr > 25000 and recovery_probability < 0.70"
     action: HUMAN_REVIEW
     reason: "High-value uncertain recovery requires bounded human review."
 
   - id: R007
-    name: retry_eligible
+    name: retry_now_eligible
     priority: 50
-    condition: "failure_category == 'temporary_decline' and recovery_probability >= 0.70 and retry_count < 3"
-    action: RETRY
+    condition: "failure_category == 'temporary_decline' and recovery_probability >= 0.70 and attempt_number < 4"
+    action: RETRY_NOW
     reason: "Temporary failure with sufficiently high predicted recovery probability."
 
   - id: R008
@@ -59,10 +70,5 @@ rules:
     action: STOP
     reason: "Expected recovery is too low for automated intervention."
 
-# Candidate action vocabulary for the later optimizer.
-candidate_actions:
-  - RETRY_NOW
-  - RETRY_LATER
-  - REQUEST_UPDATE
-  - HUMAN_REVIEW
-  - STOP
+# RETRY_LATER is selected by the future intervention optimizer when its
+# expected recovered revenue exceeds RETRY_NOW. It remains subject to R001-R006.
