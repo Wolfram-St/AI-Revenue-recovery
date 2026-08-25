@@ -1,0 +1,68 @@
+version: "1.0"
+project: "RecoverAI"
+principle: "AI recommends; policy engine authorizes."
+
+rules:
+  - id: R001
+    name: customer_opt_out
+    priority: 100
+    condition: "customer_opted_out == true"
+    action: STOP
+    reason: "Customer has opted out of recovery communications."
+
+  - id: R002
+    name: fraud_risk
+    priority: 95
+    condition: "fraud_risk == true"
+    action: STOP
+    reason: "Fraud-risk cases are excluded from automated recovery."
+
+  - id: R003
+    name: hard_decline
+    priority: 90
+    condition: "failure_category == 'hard_decline'"
+    action: STOP
+    reason: "Hard declines should not be repeatedly retried automatically."
+
+  - id: R004
+    name: retry_limit
+    priority: 85
+    condition: "retry_count >= 3"
+    action: STOP
+    reason: "Maximum automated retry count reached."
+
+  - id: R005
+    name: payment_method_update
+    priority: 80
+    condition: "failure_category == 'payment_method_issue'"
+    action: REQUEST_UPDATE
+    reason: "Recovery requires customer payment-method action."
+
+  - id: R006
+    name: high_value_uncertain
+    priority: 75
+    condition: "amount > 25000 and recovery_probability < 0.70"
+    action: HUMAN_REVIEW
+    reason: "High-value uncertain recovery requires bounded human review."
+
+  - id: R007
+    name: retry_eligible
+    priority: 50
+    condition: "failure_category == 'temporary_decline' and recovery_probability >= 0.70 and retry_count < 3"
+    action: RETRY
+    reason: "Temporary failure with sufficiently high predicted recovery probability."
+
+  - id: R008
+    name: low_probability_stop
+    priority: 40
+    condition: "recovery_probability < 0.20"
+    action: STOP
+    reason: "Expected recovery is too low for automated intervention."
+
+# Candidate action vocabulary for the later optimizer.
+candidate_actions:
+  - RETRY_NOW
+  - RETRY_LATER
+  - REQUEST_UPDATE
+  - HUMAN_REVIEW
+  - STOP
