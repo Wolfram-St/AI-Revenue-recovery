@@ -24,10 +24,14 @@
 ## Design Decisions (binding for all tasks)
 
 ### D1. Treatment assignment = two-stage hybrid (documented confounding)
+- **Probability provenance (binding):** `assign_treatments(df, probabilities, policy, policy_config=None)` receives caller-supplied recovery probabilities aligned to `df` rows — produced by the frozen Day 2 pipeline (`predict_recovery_probability(model, df)`, sigmoid-calibrated), never refit and never persisted inside the simulator. The stage-1 gate injects them into each row's context as `recovery_probability` before calling `decide_action` directly (per-row direct calls — the engine's ERV/no-op path is NOT part of assignment). *Documented consequence:* because R006/R007/R008 consume model probability, eligibility depends on model quality as well as true context; this model-dependence is part of the documented selection confounding.
 - **Stage 1 — eligibility gate (deterministic):** run the shipped `decide_action` policy over each row's decision-time context. Any row whose authorized action is `STOP` is **forced to CONTROL** ("safety-censored controls"). Rationale: treating safety-blocked customers would contradict the product's own rules.
   - *Documented selection confounding:* eligibility depends on context (fraud, opt-out, hard decline, retry count, low probability), so the probability of being assignable varies with context. Within the eligible pool, assignment is randomized. Cross-arm comparisons are therefore adjusted-for-nothing naive differences; only within-eligible-pool contrasts approach unconfoundedness. This is reported verbatim in docs/results.
 - **Stage 2 — randomized arms among eligible rows** with fixed probabilities (config): `CONTROL 0.20`, `RETRY_NOW 0.30`, `RETRY_LATER 0.25`, `REQUEST_UPDATE 0.15`, `HUMAN_REVIEW 0.10`. Chosen to guarantee **overlap**: every eligible row has positive probability for every arm (positivity holds by construction within the eligible stratum).
-- `CONTROL` definition (explicit): a row that receives **no intervention**. Two sources: (a) randomized control arm among eligible rows ("randomized controls" — clean natural-recovery signal), (b) safety-stopped rows ("safety-censored controls"). Both are labeled; reporting utilities separate them.
+- `CONTROL` definition (explicit): a row that receives **no intervention**. Two sources: (a) randomized control arm among eligible rows ("randomized controls" — clean natural-recovery signal), (b) safety-stopped rows ("safety-censored controls"). Both are labeled; reporting utilities separate them. Safety-censored rows carry `assignment_probability = 0.0` (no stage-2 draw occurred; pins semantics for validators and future weighted estimators).
+
+### D1b. Seed-stream allocation convention (binding, prevents cross-stage stream reuse)
+All stochastic components derive from ONE master seed (`policy.master_seed`) via `numpy.random.default_rng(master_seed).spawn(k)` in a FIXED order: **child 0 = stage-2 assignment multinomial · child 1 = outcome Bernoulli draws · child 2 = temporal resolution windows**. Modules must accept their child generator (or the master policy plus a named child index constant exported from `simulation/config.py`: `SEED_STREAM_ASSIGNMENT=0`, `SEED_STREAM_OUTCOMES=1`, `SEED_STREAM_TEMPORAL=2`). Bare `default_rng(seed)` re-derivation inside any module is forbidden — this prevents row-aligned correlation between outcome draws and resolution windows that determinism tests cannot catch.
 
 ### D2. Synthetic ground truth (the simulator IS the world)
 For row i assigned action a:
@@ -35,14 +39,14 @@ For row i assigned action a:
 base_logit(i)      = b0 + Σ bk·feature_k(i)          # documented coefficients
 effect_logit(i,a)  = m(a) + interaction(i,a)         # closed-form, config numbers
 propensity(i,a)    = sigmoid(base_logit + effect_logit)     # PRE-noise probability
-noise(i)           = Normal(0, sigma)                # logit-scale noise
-recovered_sim(i)   ~ Bernoulli(sigmoid(logit(base propensity) + noise))
+noise(i)           = Normal(0, sigma)                # logit-scale noise (child stream 1)
+recovered_sim(i)   ~ Bernoulli(sigmoid(logit(propensity(i, assigned_arm)) + noise))
 ```
 - `base_logit` coefficients mirror the Day 1 generator family (temporary_decline +0.95 … hard_decline −1.45, history/attempt/method terms) so propensities live in a realistic band; exact values are data in the YAML, not hidden code.
 - Main effects `m(a)` (logit shifts vs control): `RETRY_NOW +0.60`, `RETRY_LATER +0.35`, `REQUEST_UPDATE +0.45`, `HUMAN_REVIEW +0.25`, `CONTROL 0`. Chosen to be meaningful but not deterministic.
-- One interaction term, named and bounded: `RETRY_NOW × temporary_decline = +0.40` (immediate retry works best on transient failures); `RETRY_LATER × attempt_number≥3 = −0.25` (late-stage fatigue). Closed enum — no user-supplied expressions.
+- Exactly TWO interaction terms, named and bounded (closed enum — no user-supplied expressions): `RETRY_NOW × temporary_decline = +0.40` (immediate retry works best on transient failures); `RETRY_LATER × attempt_number≥3 = −0.25` (late-stage fatigue).
 - Noise: `sigma = 0.50` logit-scale Gaussian.
-- Stored ground truth per row: `base_recovery_propensity`, `action_effect_logit`, `propensity_under_assignment`, `assignment_probability` (stage-2 probability of the realized arm). These are **GROUND TRUTH / evaluation-only**, never features.
+- Stored ground truth per row: `base_recovery_propensity`, `action_effect_logit`, `propensity_under_assignment`, `assignment_probability` (stage-2 probability of the realized arm; 0.0 for safety-censored rows). These are **GROUND TRUTH / evaluation-only**, never features.
 
 ### D3. Outcome & revenue generation
 - `simulated_recovered ~ Bernoulli(propensity_under_assignment ⊕ noise)` (single draw per row).
@@ -88,7 +92,7 @@ The joined frame `(payment_attempts ⋈ treatment_outcomes) on attempt_id` provi
 
 **Files:** Create `simulation/treatment.py`; Test `tests/test_treatment_assignment.py`
 
-**Interfaces:** `assign_treatments(df, policy, policy_config=None) -> pd.DataFrame` indexed like df: `assigned_action`, `arm_source`, `assignment_probability`. Stage 1 uses real `decide_action`; stage 2 seeded multinomial via `np.random.default_rng(policy.master_seed).spawn`ed child. Deterministic under fixed seed; different seeds differ stochastically (statistical test on large n, not flaky equality). Tests: STOP rows always CONTROL+safety_censored; eligible arms match configured set; empirical frequencies within tolerance on n=20000 synthetic frame (loose bounds, e.g., ±0.03); positivity: every eligible row has positive probability for every arm; no impossible actions; input df not mutated.
+**Interfaces:** `assign_treatments(df, probabilities, policy, policy_config=None) -> pd.DataFrame` indexed like df: `assigned_action`, `arm_source`, `assignment_probability`. Stage 1 calls real `decide_action` per row with `recovery_probability=probabilities[i]` injected into the context (direct calls; the engine ERV path is not used). Stage 2 uses seed-stream child 0 (D1b). Deterministic under fixed master seed; different master seeds differ stochastically (statistical test on large n, not flaky equality). Tests: STOP rows always CONTROL+safety_censored with `assignment_probability==0.0`; eligible arms match configured set; empirical frequencies within tolerance on n=20000 synthetic frame (loose bounds, e.g., ±0.03); positivity: every eligible row has positive probability for every arm; no impossible actions; input df not mutated; missing/NaN probabilities rejected loudly.
 
 - [ ] RED → GREEN → full suite → Docker → review → commit `feat: assign treatments with eligibility gate and randomized arms`
 
@@ -96,7 +100,7 @@ The joined frame `(payment_attempts ⋈ treatment_outcomes) on attempt_id` provi
 
 **Files:** Create `simulation/outcomes.py`; Test `tests/test_outcomes.py`
 
-**Interfaces:** `simulate_outcomes(df_with_assignments, policy, seed=None) -> pd.DataFrame`: `simulated_recovered`, plus ground-truth columns per D2. Base-propensity coefficients read from policy config (not hardcoded). Tests: control mean ≈ sigmoid(base) within MC tolerance on large n; each arm's observed rate moves in the direction/magnitude of its known effect (large-n sanity bands); boundaries impossible (probabilities strictly in (0,1) given finite logits + noise — verify no 0/1 emitted); different seeds → different draws, same seed → identical; interaction visible (temporary_decline RETRY_NOW rate > unknown-category RETRY_NOW rate at matched amounts); no future info (function consumes only decision-time columns — enforced by column whitelist internally).
+**Interfaces:** `simulate_outcomes(df_with_assignments, policy) -> pd.DataFrame`: `simulated_recovered`, plus ground-truth columns per D2. Uses seed-stream child 1 (D1b). Base-propensity coefficients read from policy config (not hardcoded). Tests: control mean ≈ sigmoid(base) within MC tolerance on large n; each arm's observed rate moves in the direction/magnitude of its known effect (large-n sanity bands); boundaries impossible (probabilities strictly in (0,1) given finite logits + noise — verify no 0/1 emitted); different seeds → different draws, same seed → identical; interaction visible (temporary_decline RETRY_NOW rate > unknown-category RETRY_NOW rate at matched amounts); no future info (function consumes only decision-time columns — enforced by column whitelist internally).
 
 - [ ] RED → GREEN → full suite → Docker → review → commit `feat: simulate action-aware recovery outcomes with stored ground truth`
 
@@ -120,7 +124,7 @@ The joined frame `(payment_attempts ⋈ treatment_outcomes) on attempt_id` provi
 
 **Files:** Create `simulation/temporal.py`; Test `tests/test_temporal_treatment.py`
 
-**Interfaces:** `stamp_treatment_timeline(df_with_outcomes, policy, seed=None) -> DataFrame` adding `treatment_timestamp`/`outcome_timestamp` per D4 (delays from config; seeded uniform windows). Tests: strict ordering invariant incl. arm-specific delay correctness; CONTROL null-treatment rule; impossible timestamps rejected (treatment before failure); reproducible under seed; timezone-consistent UTC.
+**Interfaces:** `stamp_treatment_timeline(df_with_outcomes, policy) -> DataFrame` adding `treatment_timestamp`/`outcome_timestamp` per D4 (delays from config; resolution windows from seed-stream child 2 per D1b). Tests: strict ordering invariant incl. arm-specific delay correctness; CONTROL null-treatment rule; impossible timestamps rejected (treatment before failure); reproducible under seed; timezone-consistent UTC.
 
 - [ ] RED → GREEN → full suite → Docker → review → commit `feat: integrate treatment and outcome timing after failure events`
 
@@ -140,7 +144,7 @@ Run canonical pipeline (5000 rows, seed from config), capture REAL outputs: arm 
 - "The treatment environment is synthetic and does not establish real-world causal treatment effects."
 - "The Day 2 baseline remains P(recovered | context)."
 - "Action-aware observations are now available for future modeling, but no action-aware predictive model is implemented in Day 4."
-Gate table → GO/NO-GO for Day 5 action-aware modeling. Commit `docs: close day 4 treatment simulation verification`.
+Gate table → GO/NO-GO for Day 5 action-aware modeling. Document the known in-sample caveat: stage-1 probabilities come from Day 2 model predictions over all 5,000 rows, so train-row probabilities are mildly in-sample (slightly optimistic feeding R006/R007/R008); note also that treated rows resolve on `treatment_ts + window` vs controls on `failure_ts + window` — a systematic horizon asymmetry irrelevant to rate reporting but relevant to any future time-to-recovery analysis. Commit `docs: close day 4 treatment simulation verification`.
 
 ---
 
