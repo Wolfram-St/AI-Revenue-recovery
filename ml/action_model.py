@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from ml.evaluate import CalibratedClassifierCV, FrozenEstimator
 from ml.features import NUMERIC_FEATURES, CATEGORICAL_FEATURES, build_feature_matrix
 from ml.train import _build_pipeline
 
@@ -132,6 +133,64 @@ def train_action_models(
         "small_segments": small_segments,
     }
     return ActionModelBundle(models=models, arms=ARM_ORDER, metadata=metadata), metadata
+
+
+def calibrate_action_models(
+    bundle: ActionModelBundle,
+    validation_frame: pd.DataFrame,
+) -> ActionModelBundle:
+    """Wrap every arm pipeline in per-arm sigmoid probability calibration.
+
+    Mirrors the Day 2 ``calibrate_model`` discipline one arm at a time: each
+    fitted raw pipeline is sealed inside ``FrozenEstimator`` (so its learned
+    state can never refit and its own predictions stay byte-identical) and a
+    fresh ``CalibratedClassifierCV(method="sigmoid")`` wrapper is fitted on
+    exactly ``validation_frame[(stratum == "randomized") & (assigned_action ==
+    arm)]`` rows. The wrapper classes are imported through ``ml.evaluate`` so
+    this module's import-root whitelist stays untouched. The calibration
+    target is EXPLICITLY the ``simulated_recovered`` simulator column -- the
+    identical synthetic-world-only discipline as training -- never the
+    builder's ``recovered`` label. An arm with zero such validation rows
+    raises ``ValueError`` naming the arm. Returns a NEW frozen bundle whose
+    metadata extends the input copy-for-copy with a ``calibration`` record;
+    the input bundle, its pipelines, and its metadata are left unmutated.
+    """
+    _require_frame(validation_frame, "validation_frame")
+    _require_observation_columns(validation_frame, "validation_frame")
+
+    randomized_validation = _randomized_rows(validation_frame)
+
+    calibrated_models = {}
+    calibration_rows = {}
+    for arm in bundle.arms:
+        arm_validation = randomized_validation.loc[
+            randomized_validation[ACTION_COLUMN] == arm
+        ]
+        if len(arm_validation) == 0:
+            raise ValueError(
+                f"arm '{arm}' has zero randomized validation rows in "
+                "validation_frame; cannot fit a calibrator without observations"
+            )
+        X_validation, _baseline_label = build_feature_matrix(arm_validation)
+        y_validation = arm_validation[TARGET_COLUMN].astype(int)
+        calibrated = CalibratedClassifierCV(
+            estimator=FrozenEstimator(bundle.models[arm]), method="sigmoid"
+        )
+        calibrated.fit(X_validation, y_validation)
+        calibrated_models[arm] = calibrated
+        calibration_rows[arm] = int(len(arm_validation))
+
+    metadata = {
+        **bundle.metadata,
+        "calibration": {
+            "method": "sigmoid",
+            "rows": calibration_rows,
+            "fit_on": "validation_randomized_only",
+        },
+    }
+    return ActionModelBundle(
+        models=calibrated_models, arms=bundle.arms, metadata=metadata
+    )
 
 
 def predict_action_probability(
