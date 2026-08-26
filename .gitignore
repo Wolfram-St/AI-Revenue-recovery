@@ -1,6 +1,9 @@
 # Generated dataset - reproducible via data/generate_dataset.py
 data/payment_attempts.csv
 
+# Generated treatment/outcome artifact - reproducible via simulation.cli generate
+data/treatment_outcomes.csv
+
 # Python artifacts
 __pycache__/
 *.pyc
