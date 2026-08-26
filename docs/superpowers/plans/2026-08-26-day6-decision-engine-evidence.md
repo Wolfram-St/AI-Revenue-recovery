@@ -29,25 +29,28 @@ Pooled model: features = `build_feature_matrix(X)` + one-hot `assigned_action` v
 Measurements, both families: micro + per-arm AUC/Brier (bootstrap CIs B=500 seeded), mean |P̂−integrated TRUE|, logit-scale effect contrasts vs config (+ interaction cells), learning curves at train fractions {0.25, 0.50, 1.00} (micro-Brier + smallest-arm Brier at each point), multi-seed stability (seeds {20260826, 1, 2, 3} → sd of micro-Brier and of arm-mean incrementals), wall-clock fit seconds, parameter counts.
 
 ### D-E2. Pre-registered pooled-preference rule
-Pooled becomes the preferred production model ONLY if ALL hold on the canonical 100%-fraction run:
-1. micro-Brier(pooled) < micro-Brier(per-arm), AND the per-arm micro-Brier CI upper bound ≥ pooled point estimate (non-overlap evidence, not noise);
-2. pooled mean |P̂−TRUE| ≤ per-arm mean |P̂−TRUE| (ground-truth agreement no worse);
+Both bundle kinds are computed and REPORTED; the rule is applied to the **calibrated bundles only** (the shipped form per Day 5), with raw results retained as history. CIs use the Day-5 stratified-bootstrap scheme with corrected pool offsets. Pooled becomes the preferred production model ONLY if ALL hold on the canonical 100%-fraction calibrated run:
+1. **Strict CI non-overlap on micro-Brier**: pooled CI95 upper < per-arm CI95 lower (point-ordering alone is insufficient — noted as context, not evidence);
+2. pooled mean |P̂−integrated TRUE| ≤ per-arm mean |P̂−TRUE| (ground-truth agreement no worse);
 3. smallest-arm (HUMAN_REVIEW) test Brier(pooled) ≤ per-arm HUMAN_REVIEW Brier;
-4. interaction-cell recovery (RETRY_NOW×temporary_decline gap vs config) within its band for pooled as for per-arm.
+4. interaction-cell recovery within band for pooled as for per-arm, carrying the `attenuation_expected` annotation semantics (fatigue cell reported-not-gated, mirroring Day 5).
 Otherwise per-arm remains preferred. Either way both stay available; nothing is deleted.
 
 ### D-E3. CLI contract (Gate B)
-`python -m simulation.cli generate [--rows 5000] [--seed 20260826] [--out data/treatment_outcomes.csv]` → writes CSV via the frozen chain (assemble_observations internal path) + prints summary JSON line; exit code non-zero on validation failure. `validate [--csv PATH]` → runs `validate_treatment_dataset` report. `summary [--csv PATH]` → reporting.summarize_arms + observed_diagnostics JSON. Same seed+rows ⇒ byte-identical file (sha256 pinned by test). `.gitignore` gains `data/treatment_outcomes.csv`. CLI must not import ml/ modules (simulation-layer purity).
+`python -m simulation.cli generate [--rows 5000] [--seed 42] [--out data/treatment_outcomes.csv]` → writes CSV via the frozen chain (assemble_observations internal path) + prints summary JSON line; exit code non-zero on validation failure. **Seed semantics: `--seed` is the DATASET-generation seed (default 42 = canonical world); the policy master_seed always comes from `config/treatment_policy.yaml` — the two are distinct and both recorded in CLI output.** DAY6 tables state which world each comes from.
+**Purity scope (resolves the baseline-dependency):** `generate` must reproduce the frozen chain INCLUDING calibrated Day-2 baseline probabilities; therefore simulation/cli.py may import exactly `ml.train.train_baseline`, `ml.evaluate.calibrate_model`, and `ml.train.predict_recovery_probability` (documented, seed-pinned) — importing any action-model/comparison module (`ml.action_model`, `ml.action_evaluation`, `ml.incremental`, `ml.pooled_model`, `ml.model_comparison`) remains forbidden and purity-tested.
+`validate [--csv PATH]` → runs `validate_treatment_dataset` report. `summary [--csv PATH]` → reporting.summarize_arms + observed_diagnostics JSON. Same seed+rows ⇒ byte-identical file (sha256 pinned by test). `.gitignore` gains `data/treatment_outcomes.csv`.
 
 ### D-E4. Decision-quality metrics (Gate C measurement)
-On randomized test contexts, for each treated arm a:
-- `model_incremental_revenue(a)` per Day 5 definitions (uncalibrated? NO — use the CALIBRATED bundle, matching shipped form; documented).
+On randomized test contexts. **Candidate set = the 4 treated arms; CONTROL excluded** (uniform retry-cost makes CONTROL revenue undefined/negative — argmax over treated arms only). Ties broken deterministically by ARM_ORDER precedence on both model and truth sides. Because cost/risk terms are arm-independent constants per row, argmax decisions reduce to argmax incremental-recovery × amount — stated in docs so cost sensitivity is not misread.
+For each treated arm a:
+- `model_incremental_revenue(a)` from the CALIBRATED bundle (shipped form, documented);
 - `truth_incremental_revenue(a)` from noise-integrated `ground_truth_propensity`.
 Metrics:
-1. **Decision-match rate**: fraction of contexts where argmax_a MODEL revenue == argmax_a TRUTH revenue (ties → CONTROL-conservative count as match only if CONTROL is the truth argmax too).
-2. **Regret ratio**: E[truth_revenue(truth_argmax)] − E[truth_revenue(model_argmax)], divided by E[truth_revenue(truth_argmax)] (relative regret).
-3. **Bootstrap CI** (B=500 seeded) around each treated arm's mean model incremental revenue; count arms whose CIs overlap another arm's (material-difference feasibility).
-4. Uncertainty inventory: per-arm n, calibration status, propensity-range overlap, seed-variance of arm-mean incrementals (from D-E1 stability runs).
+1. **Decision-match rate**: fraction of contexts where argmax_a MODEL revenue == argmax_a TRUTH revenue (ARM_ORDER tie-break both sides); binomial CI reported.
+2. **Relative regret**: E[truth_revenue(truth_argmax)] − E[truth_revenue(model_argmax)], divided by E[truth_revenue(truth_argmax)]; guard: denominator ≤ 0 → reported undefined; **per-row regret quantiles (p50/p90/p99) also reported** (mean-relative-regret hides heavy tails).
+3. **Bootstrap CI** (B=500 seeded) around each treated arm's mean model incremental revenue; pairwise CI-overlap matrix.
+4. Uncertainty inventory: per-arm n, calibration status, propensity-range overlap, seed-variance of arm-mean incrementals AND of match rate/regret (from D-E1 stability runs).
 
 ### D-E5. Pre-registered optimizer classification rule
 The classifier returns `OPTIMIZER_JUSTIFIED` iff ALL hold on the canonical calibrated-bundle run:
@@ -57,7 +60,10 @@ The classifier returns `OPTIMIZER_JUSTIFIED` iff ALL hold on the canonical calib
 4. at least two treated arms have mutually non-overlapping bootstrap CIs (i.e., distinctions the evidence CAN support exist).
 Otherwise `OPTIMIZER_NOT_YET_JUSTIFIED` with machine-readable reasons. Thresholds are transparent conventions chosen before measurement; sensitivity to them is reported (metrics printed alongside).
 
-If NOT justified: no recommender is enabled; `ml/decision_policy.py` still ships the classifier + the bounded recommender class whose constructor raises `OptimizerNotJustifiedError` unless constructed with an evidence bundle whose classification is JUSTIFIED (capability exists, gated by evidence — never silently active). Docs identify the exact evidence needed next.
+If NOT justified: no recommender is enabled; `ml/decision_policy.py` still ships the classifier + the bounded recommender class whose constructor raises `OptimizerNotJustifiedError` unless constructed with an evidence bundle whose classification is JUSTIFIED. The gate is ADVISORY scaffolding (an in-process caller could fabricate an evidence dict) — docstrings state this, and evidence bundles carry a `provenance_digest` field (sorted-json SHA pattern from Day 5) so non-canonical bundles are visibly so. Docs identify the exact evidence needed next.
+
+### D-E6. Learning-curve protocol
+Fractions {0.25, 0.50, 1.00} apply to the TRAIN segment only; calibration at every fraction uses the FULL validation segment unchanged (comparability across fractions); per-arm family refits all five arms at each fraction (intended and counted); stability seeds {20260826, 1, 2, 3}. DAY6.md states explicitly that the optimizer verdict is single-canonical-run with stability REPORTED, not stability-certified.
 
 ---
 
