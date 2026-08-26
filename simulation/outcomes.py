@@ -64,6 +64,18 @@ _AMOUNT_SCALE_INR = 1000.0
 _PROPENSITY_DECIMALS = 6
 _LOGIT_REPRESENTABLE_BOUND = 30.0
 
+# Deterministic Gauss-Hermite nodes for the noise-INTEGRATED truth replay
+# (plan decision D5/D-M5): E_eps[sigmoid(logit + eps)], eps ~ N(0,
+# noise_sigma_logit^2), evaluated as sum_j w_j/sqrt(pi) *
+# sigmoid(logit + sqrt(2) * sigma * x_j) with k=20 nodes. Fixed at import so
+# the replay is fully deterministic and vectorized.
+_GAUSS_HERMITE_K = 20
+_HERMITE_NODES, _HERMITE_RAW_WEIGHTS = np.polynomial.hermite.hermgauss(
+    _GAUSS_HERMITE_K
+)
+_HERMITE_WEIGHTS = _HERMITE_RAW_WEIGHTS / math.sqrt(math.pi)
+_NOISE_SCALE_FACTOR = math.sqrt(2.0)
+
 
 def _sigmoid(values: np.ndarray) -> np.ndarray:
     """Overflow-safe logistic transform: exp() only ever sees non-positive
@@ -130,6 +142,74 @@ def _reject_unknown_categories(category_values: np.ndarray) -> None:
         )
 
 
+def _arm_logits(
+    df: pd.DataFrame, policy: TreatmentPolicy, action: str | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Shared private logit engine for simulation and truth replay.
+
+    Returns ``(base_logits, effect_logits)`` for every row of ``df``,
+    computed EXACTLY once here so ``simulate_outcomes`` and
+    ``ground_truth_propensity`` can never drift apart (plan decision D-M5:
+    one logit implementation shared by draw and replay). ``action=None``
+    consumes the per-row ``assigned_action`` column (the simulation path);
+    a canonical arm name broadcasts that single arm to every row (the
+    counterfactual replay path). Callers own validation of required columns,
+    NaN hygiene, canonical arms/categories, and representable magnitude;
+    this helper is pure arithmetic over already-validated frames and never
+    mutates its inputs.
+    """
+    terms = policy.base_propensity_terms
+    n_rows = len(df)
+
+    successful = df["successful_payment_count"].to_numpy(dtype=float)
+    historical = df["historical_recovery_count"].to_numpy(dtype=float)
+    attempt_number = df["attempt_number"].to_numpy(dtype=float)
+    fraud_risk = df["fraud_risk"].astype(float).to_numpy()
+    amount_inr = df["amount_inr"].to_numpy(dtype=float)
+    method_upi = (df["payment_method"] == "upi").to_numpy(dtype=float)
+    device_android = (df["device_type"] == "android").to_numpy(dtype=float)
+
+    category_values = df["failure_category"].to_numpy()
+    category_term = np.array(
+        [terms.category_effects[category] for category in category_values],
+        dtype=float,
+    )
+    base_logits = (
+        float(terms.intercept)
+        + category_term
+        + float(terms.successful_payment_count_log1p) * np.log1p(successful)
+        + float(terms.historical_recovery_count_min5)
+        * np.minimum(historical, _HISTORICAL_RECOVERY_CAP)
+        + float(terms.attempt_number_prior_offset)
+        * np.maximum(attempt_number - 1.0, 0.0)
+        + float(terms.fraud_risk) * fraud_risk
+        + float(terms.amount_log1p_per_k)
+        * np.log1p(amount_inr / _AMOUNT_SCALE_INR)
+        + float(terms.method_upi) * method_upi
+        + float(terms.device_android) * device_android
+    )
+
+    if action is None:
+        assigned_values = df["assigned_action"].to_numpy()
+    else:
+        assigned_values = np.full(n_rows, action, dtype=object)
+
+    effect_logits = np.array(
+        [policy.main_effects_logit[arm] for arm in assigned_values], dtype=float
+    )
+    for rule in policy.interactions:
+        fires = assigned_values == rule.action
+        if rule.column == "failure_category":
+            fires = fires & (category_values == rule.equals_value)
+        else:
+            fires = fires & (attempt_number >= float(rule.min_threshold))
+        effect_logits = effect_logits + np.asarray(fires, dtype=float) * float(
+            rule.effect_logit
+        )
+
+    return base_logits, effect_logits
+
+
 def simulate_outcomes(
     df_with_assignments: pd.DataFrame, policy: TreatmentPolicy
 ) -> pd.DataFrame:
@@ -186,56 +266,12 @@ def simulate_outcomes(
     _reject_unknown_arms(assigned_values)
     _reject_unknown_categories(category_values)
 
-    terms = policy.base_propensity_terms
     n_rows = len(df_with_assignments)
+    base_logits, effect_logits = _arm_logits(df_with_assignments, policy, action=None)
 
-    successful = df_with_assignments["successful_payment_count"].to_numpy(dtype=float)
-    historical = df_with_assignments["historical_recovery_count"].to_numpy(dtype=float)
-    attempt_number = df_with_assignments["attempt_number"].to_numpy(dtype=float)
-    fraud_risk = df_with_assignments["fraud_risk"].astype(float).to_numpy()
-    amount_inr = df_with_assignments["amount_inr"].to_numpy(dtype=float)
-    method_upi = (df_with_assignments["payment_method"] == "upi").to_numpy(dtype=float)
-    device_android = (df_with_assignments["device_type"] == "android").to_numpy(dtype=float)
-
-    category_term = np.array(
-        [terms.category_effects[category] for category in category_values],
-        dtype=float,
-    )
-    base_logits = (
-        float(terms.intercept)
-        + category_term
-        + float(terms.successful_payment_count_log1p) * np.log1p(successful)
-        + float(terms.historical_recovery_count_min5)
-        * np.minimum(historical, _HISTORICAL_RECOVERY_CAP)
-        + float(terms.attempt_number_prior_offset)
-        * np.maximum(attempt_number - 1.0, 0.0)
-        + float(terms.fraud_risk) * fraud_risk
-        + float(terms.amount_log1p_per_k)
-        * np.log1p(amount_inr / _AMOUNT_SCALE_INR)
-        + float(terms.method_upi) * method_upi
-        + float(terms.device_android) * device_android
-    )
-
-    effect_logits = np.array(
-        [policy.main_effects_logit[arm] for arm in assigned_values], dtype=float
-    )
-    for rule in policy.interactions:
-        fires = assigned_values == rule.action
-        if rule.column == "failure_category":
-            fires = fires & (category_values == rule.equals_value)
-        else:
-            fires = fires & (attempt_number >= float(rule.min_threshold))
-        effect_logits = effect_logits + np.asarray(fires, dtype=float) * float(
-            rule.effect_logit
-        )
-
-    logits = np.concatenate([base_logits, effect_logits])
-    if n_rows > 0 and not np.all(np.isfinite(logits)):
-        raise ValueError(
-            "computed base/effect logits must stay finite; check the supplied "
-            "policy coefficients and consumed column values"
-        )
-
+    # Single consolidated finiteness/magnitude guard (review F5): the
+    # pre-noise assignment logits subsume the raw base/effect vectors, so
+    # one check covers finiteness AND the representable synthetic range.
     assignment_logits = base_logits + effect_logits
     if n_rows > 0:
         checked_logits = np.concatenate([base_logits, assignment_logits])
@@ -267,6 +303,7 @@ def simulate_outcomes(
     # return exactly that amount, and unrecovered rows return exactly zero --
     # so a payout can never exceed the settled payable even when raw
     # amount_inr carries more than two decimals.
+    amount_inr = df_with_assignments["amount_inr"].to_numpy(dtype=float)
     settled_amounts = np.round(amount_inr, 2)
     payouts = np.where(recovered == 1, settled_amounts, 0.0)
 
@@ -296,3 +333,66 @@ def simulate_outcomes(
         },
         index=df_with_assignments.index,
     )
+
+
+def ground_truth_propensity(
+    df: pd.DataFrame, policy: TreatmentPolicy, action: str
+) -> np.ndarray:
+    """Public deterministic SYNTHETIC GROUND TRUTH replay (plan decision D-M5).
+
+    For each row of ``df``, return the NOISE-INTEGRATED arm propensity
+
+        p_i = E_eps[sigmoid(base_logit_i + effect_logit_i(action) + eps)],
+        eps ~ N(0, policy.noise_sigma_logit^2),
+
+    evaluated by Gauss-Hermite quadrature with k=20 nodes:
+
+        p_i = sum_j w_j/sqrt(pi) * sigmoid(logit_i + sqrt(2)*sigma*x_j)
+
+    over the fixed node/weight pair ``np.polynomial.hermite.hermgauss(20)``.
+    This is the population quantity a perfectly fitted per-arm model
+    converges to -- NOT the stored pre-noise
+    ``sigmoid(base + effect)``; comparing against the pre-noise curve would
+    carry an arm-dependent Jensen bias of up to roughly +-4 percentage
+    points. The logits come from the SAME private helper that powers
+    ``simulate_outcomes`` (``_arm_logits``), so replay and draw can never
+    drift apart.
+
+    Deterministic and vectorized: no randomness is drawn here at all, the
+    input frame and policy are never mutated, and identical inputs yield a
+    bit-identical float64 array aligned row-for-row with ``df``. An empty
+    frame yields an empty array.
+
+    Raises ``ValueError`` naming the offending item when ``action`` leaves
+    the canonical arm set, ``policy.noise_sigma_logit`` is not finite and
+    positive (identical discipline to ``simulate_outcomes``), required
+    decision-time columns are missing, or a consumed column holds NaN/None.
+
+    This function describes the synthetic world defined by the declarative
+    policy only; it supports nothing causal about any production system.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise ValueError(f"df must be a pandas DataFrame, got {type(df).__name__}")
+    if not isinstance(action, str) or action not in CANONICAL_ARMS:
+        raise ValueError(
+            f"unknown action {action!r}; ground_truth_propensity replays the "
+            f"canonical arms {sorted(CANONICAL_ARMS)} only"
+        )
+    # Review F6: identical noise-sigma discipline as simulate_outcomes --
+    # a degenerate sigma would silently integrate a different world.
+    sigma = float(policy.noise_sigma_logit)
+    if not math.isfinite(sigma) or sigma <= 0.0:
+        raise ValueError(
+            f"policy.noise_sigma_logit must be finite and positive, got {sigma!r}"
+        )
+    _reject_missing_columns(df)
+    _reject_nan_columns(df)
+
+    base_logits, effect_logits = _arm_logits(df, policy, action)
+    sigma = float(policy.noise_sigma_logit)
+    shifted = (
+        (base_logits + effect_logits)[:, None]
+        + _NOISE_SCALE_FACTOR * sigma * _HERMITE_NODES[None, :]
+    )
+    integrated = (_sigmoid(shifted) * _HERMITE_WEIGHTS[None, :]).sum(axis=1)
+    return np.asarray(integrated, dtype=float)
