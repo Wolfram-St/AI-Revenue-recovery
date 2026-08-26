@@ -34,20 +34,21 @@ Five independent fits (`CONTROL`, `RETRY_NOW`, `RETRY_LATER`, `REQUEST_UPDATE`, 
 `build_feature_matrix` output columns (14 numeric/categorical features) — identical preprocessing philosophy (numeric passthrough + one-hot handle_unknown=ignore). No timestamps, no assignment metadata, no ground truth, no outcome fields. Enforced by constructing inputs exclusively through `build_feature_matrix`.
 
 ### D-M4. Splits and calibration
-Chronological 70/15/15 over the observation frame by `event_timestamp` (reuse `chronological_split`). Each arm's pipeline fits on train∩(randomized ∩ arm); sigmoid calibration fitted per arm on validation∩(randomized ∩ arm); test used once for reported metrics. Arms with <100 training rows would be flagged in metadata (none expected at canonical scale).
+Chronological 70/15/15 over the observation frame by `event_timestamp` (reuse `chronological_split`). Each arm's pipeline fits on train∩(randomized ∩ arm); sigmoid calibration fitted per arm on validation∩(randomized ∩ arm); test used once for reported metrics. Arms with <100 rows in ANY segment (train, calibration/validation remainder, or test) are flagged in metadata (`small_segments`) — HUMAN_REVIEW (n≈383 randomized, smallest class) is the expected fragile spot. Task 3's Brier sanity check uses a validation REMAINDER sub-slice (never the test segment) with tolerance ≥3× binomial MC sd at the smallest arm (~0.04 absolute), derivation stated in the test. Because per-arm test slices (n≈57–246) are individually noisy (Brier MC sd ≈0.008–0.013; AUC CI half-width ±0.08–±0.14), Task 4 reports seeded stratified row-level bootstrap 95% CIs (B=500) around per-arm AUC/Brier AND micro-averaged all-arm metrics alongside per-arm values.
 
 ### D-M5. Ground-truth counterfactual replay (the scientific check)
-Because the simulator is fully known, TRUE noiseless arm propensity for any (context, arm) is reproducible: `sigmoid(base_logit(context) + effect_logit(context, arm))` using the same formula/config as `simulation/outcomes.py`. Evaluation exposes `ground_truth_propensity(context_frame, policy, action)` (deterministic replay helper living in `simulation/outcomes.py` as a public function so the DGP has ONE implementation). Comparisons:
-- per-arm mean |P̂_a − TRUE_a| over test contexts,
-- mean estimated vs true `IncrementalRecovery(a)`,
-- rank correlation between estimated and true per-row propensities.
+Because the simulator is fully known, TRUE noiseless arm propensity is reproducible. The correct population target of P̂ is the **noise-integrated** probability `E_ε[sigmoid(base_logit + effect_logit + ε)]`, NOT the pre-noise `sigmoid(base+effect)` — a perfectly fitted model converges to the former, and raw pre-noise comparison carries an arm-dependent Jensen bias up to ~±4 pp. Therefore:
+- `ground_truth_propensity(df, policy, action)` (public function in `simulation/outcomes.py`) returns the noise-integrated probability via deterministic Gauss–Hermite quadrature (k=20 nodes), sharing ONE logit implementation with `simulate_outcomes` (private-helper refactor; behavior pinned by existing tests plus a canonical-value pin).
+- Primary agreement checks are logit-scale contrasts: estimated-vs-config effect recovery per arm, plus interaction-structure recovery (RETRY_NOW×temporary_decline and RETRY_LATER×attempt≥3 cell contrasts) — where noise is symmetric and additive.
+- Secondary probability-scale checks report mean |P̂−integrated TRUE| with the Jensen floor acknowledged; never used as pass/fail gates.
+- Agreement battery: Pearson r AND Spearman ρ between P̂ and integrated TRUE per arm (both reported — they diverge exactly where the nonlinear transform bites).
 These validate whether the model RECOVERS THE SYNTHETIC STRUCTURE. They say nothing about production.
 
 ### D-M6. Economic reporting boundary
 `IncrementalRevenue(a) = IncrementalRecovery(a) × amount − intervention_cost − risk_penalty` reusing Day 2 scoring constants (`RETRY_INTERVENTION_COST_INR`, unknown-category risk fraction) — reported as `MODEL ESTIMATE` alongside the `SIMULATED GROUND TRUTH` counterpart computed from true propensities. Explicitly labeled non-causal, synthetic-world-only, and NOT an optimization target in Day 5.
 
 ### D-M7. Baseline relationship
-Day 2 `P(recovered | context)` stays the control reference: evaluation reports, per arm, Brier/AUC of the action-aware model AND of the Day 2 baseline evaluated on the same arm slices, showing what action conditioning adds (expected: gains concentrate where effects are large; honest deltas either way).
+Day 2 `P(recovered | context)` stays the control reference: evaluation reports, per arm, Brier/AUC of the action-aware model AND of the Day 2 baseline evaluated on the same arm slices, showing what action conditioning adds (honest deltas either way; DAY5.md must state that this comparison also absorbs the Day-1-to-Day-4 DGP transfer mismatch, not purely the value of action conditioning).
 
 ---
 
@@ -68,7 +69,7 @@ Tests: join integrity (row count/order preserved, ids aligned), stratum correctn
 **Files:** Create `ml/action_model.py`; Test `tests/test_action_model.py`
 
 **Interfaces:**
-- `train_action_models(train_frame, validation_frame, seed=20260826) -> (ActionModelBundle, dict metadata)` — fits one `Pipeline(ColumnTransformer(same shapes as Day 2) + XGBClassifier(seed))` per arm on `randomized ∩ arm` rows; raises ValueError if an arm has zero training rows.
+- `train_action_models(train_frame, validation_frame, seed=20260826) -> (ActionModelBundle, dict metadata)` — fits one `Pipeline(ColumnTransformer(same shapes as Day 2) + XGBClassifier(seed))` per arm on `randomized ∩ arm` rows with **target column `simulated_recovered` EXPLICITLY** (never the Day-1 `recovered` label; a wrong-label purity test builds a fixture where the two labels disagree on every row and asserts fits track `simulated_recovered`). Raises ValueError if an arm has zero training rows.
 - `ActionModelBundle` frozen dataclass: dict arm→fitted pipeline + arms tuple + metadata (rows per arm per split, seed, feature names).
 - `predict_action_probability(bundle, context_frame, action) -> np.ndarray` — validates action ∈ bundle.arms; builds features via `build_feature_matrix`; returns probabilities in [0,1].
 - `predict_all_actions(bundle, context_frame) -> pd.DataFrame` — one column per arm.
@@ -90,7 +91,7 @@ Tests: reproducibility (same seed identical predictions), probability bounds, pe
 
 **Interfaces:**
 - In outcomes.py: `ground_truth_propensity(df, policy, action) -> np.ndarray` — public deterministic replay of the DGP WITHOUT noise (refactor internal logit computation into a private helper reused by both `simulate_outcomes` and this function so ONE implementation exists; behavior of simulate_outcomes must remain bit-identical — pinned by existing tests).
-- In action_evaluation.py: `evaluate_action_models(bundle, test_frame, policy) -> dict` — per arm: n, ROC-AUC (nan-safe single-class), PR-AUC, Brier (model), Brier (Day 2 baseline on same slice via predict_recovery_probability), mean |P̂−TRUE|, Pearson r(P̂, TRUE); plus `label: "OBSERVED SIMULATED OUTCOME"` and `truth_label: "SIMULATED GROUND TRUTH"` fields. Tests: hand-verifiable small fixture; nan-safety; Day 2 comparison present; truth replay matches manual formula; refactor leaves simulate_outcomes byte-identical (existing Task 3/4 tests green unchanged).
+- In action_evaluation.py: `evaluate_action_models(bundle, test_frame, policy) -> dict` — per arm: n, ROC-AUC (nan-safe single-class) with bootstrap 95% CI (B=500, seeded), PR-AUC, Brier (model) with CI, Brier (Day 2 baseline on same slice via predict_recovery_probability), mean |P̂−integrated TRUE| (secondary; Jensen-floor annotation), Pearson r AND Spearman ρ(P̂, integrated TRUE), logit-scale effect-contrast recovery vs configured main effects, interaction-cell recovery checks; micro-averaged all-arm metrics at top level; plus `label: "OBSERVED SIMULATED OUTCOME"` and `truth_label: "SIMULATED GROUND TRUTH"` fields. Tests: hand-verifiable small fixture; nan-safety; Day 2 comparison present; truth replay matches manual quadrature computation; refactor leaves simulate_outcomes byte-identical (existing Task 3/4 tests green unchanged + canonical-value pin).
 
 - [ ] RED → GREEN → FULL → Docker → review → commit `feat: evaluate action-aware models against simulator ground truth`
 
