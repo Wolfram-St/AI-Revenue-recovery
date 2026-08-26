@@ -45,7 +45,7 @@ Because the simulator is fully known, TRUE noiseless arm propensity is reproduci
 These validate whether the model RECOVERS THE SYNTHETIC STRUCTURE. They say nothing about production.
 
 ### D-M6. Economic reporting boundary
-`IncrementalRevenue(a) = IncrementalRecovery(a) × amount − intervention_cost − risk_penalty` reusing Day 2 scoring constants (`RETRY_INTERVENTION_COST_INR`, unknown-category risk fraction) — reported as `MODEL ESTIMATE` alongside the `SIMULATED GROUND TRUTH` counterpart computed from true propensities. Explicitly labeled non-causal, synthetic-world-only, and NOT an optimization target in Day 5.
+`IncrementalRevenue(a) = IncrementalRecovery(a) × amount − intervention_cost − risk_penalty` reusing Day 2 scoring constants (`RETRY_INTERVENTION_COST_INR`, unknown-category risk fraction) — reported as `MODEL ESTIMATE` alongside the `SIMULATED GROUND TRUTH` counterpart computed from integrated true propensities. Disclosed simplification: the single retry-cost constant is applied uniformly to ALL treated arms, including REQUEST_UPDATE/HUMAN_REVIEW whose true economics differ; revenue-table notes must carry this caveat. Explicitly labeled non-causal, synthetic-world-only, and NOT an optimization target in Day 5.
 
 ### D-M7. Baseline relationship
 Day 2 `P(recovered | context)` stays the control reference: evaluation reports, per arm, Brier/AUC of the action-aware model AND of the Day 2 baseline evaluated on the same arm slices, showing what action conditioning adds (honest deltas either way; DAY5.md must state that this comparison also absorbs the Day-1-to-Day-4 DGP transfer mismatch, not purely the value of action conditioning).
@@ -81,7 +81,7 @@ Tests: reproducibility (same seed identical predictions), probability bounds, pe
 
 **Files:** Extend `ml/action_model.py`; Extend `tests/test_action_model.py`
 
-**Interfaces:** `calibrate_action_models(bundle, validation_frame) -> ActionModelBundle` wrapping each arm pipeline in `CalibratedClassifierCV(FrozenEstimator(...), method="sigmoid")` fitted on `randomized ∩ arm ∩ validation` rows; calibrated bundles replace raw in returned bundle; metadata records calibration method + rows per arm. Tests: base pipelines unchanged (prediction probes), calibrated probabilities in [0,1], Brier on held-out slice ≤ raw + tolerance per arm (statistical, generous), rows-per-arm recorded.
+**Interfaces:** `calibrate_action_models(bundle, validation_frame) -> ActionModelBundle` wrapping each arm pipeline in `CalibratedClassifierCV(FrozenEstimator(...), method="sigmoid")` fitted on `randomized ∩ arm ∩ validation` rows; calibrated bundles replace raw in returned bundle; metadata records calibration method + rows per arm. Tests: base pipelines unchanged (prediction probes), calibrated probabilities in [0,1], Brier on a VALIDATION REMAINDER sub-slice (per D-M4; never the test segment) ≤ raw + tolerance per arm (≥0.04 absolute with derivation stated in the test), rows-per-arm recorded.
 
 - [ ] RED → GREEN → FULL → Docker → review → commit `feat: calibrate action-aware models on validation segments`
 
