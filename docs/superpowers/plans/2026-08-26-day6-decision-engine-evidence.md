@@ -71,7 +71,7 @@ Fractions {0.25, 0.50, 1.00} apply to the TRAIN segment only; calibration at eve
 
 **Files:** Create `simulation/cli.py`; Modify `.gitignore`; Test `tests/test_cli.py`
 
-Subcommands per D-E3. Tests: generate→file exists+header exact+row count; same-seed sha256 byte-identical twice; different seed → different file but validator valid; validate subcommand returns report valid:true on good CSV, false on tampered CSV; summary JSON parses with labels; --help works; unknown subcommand exits non-zero; purity (imports simulation+stdlib argparse/json only; no ml/recovery imports).
+Subcommands per D-E3. Tests: generate→file exists+header exact+row count; same-seed sha256 byte-identical twice; different seed → different file but validator valid; validate subcommand returns report valid:true on good CSV, false on tampered CSV; summary JSON parses with labels; --help works; unknown subcommand exits non-zero; AST-based purity: simulation+stdlib+EXACTLY the three documented ml baseline imports (ml.train.train_baseline, ml.evaluate.calibrate_model, ml.train.predict_recovery_probability) allowed; action-model/comparison modules forbidden per D-E3.
 
 - [ ] RED → GREEN → FULL → Docker → review → commit `feat: add reproducible treatment outcome CLI`
 
