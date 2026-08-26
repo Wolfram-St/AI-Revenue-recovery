@@ -573,6 +573,47 @@ def test_micro_average_pools_assigned_arm_predictions_exactly(small_world):
     )
 
 
+def test_micro_average_bootstrap_ci_contains_point_estimate_under_heterogeneous_arms(
+    small_world,
+):
+    """Regression pin for the Day 5 Task 6 verification defect.
+
+    The MICRO block's pooled bootstrap strata must map each arm's rows onto
+    ITS OWN segment of the concatenated pool. The original implementation
+    built every per-arm index array WITHOUT its pool offset, so all five
+    strata drew from pool positions [0, n_CONTROL) and every micro resample
+    scored CONTROL-slice rows only -- the reported micro CIs tracked the
+    leading arm's behavior instead of the pooled statistic and could exclude
+    the pooled point estimate entirely.
+
+    Fixture design: keep CONTROL's learned signal but replace every treated
+    arm's label with seeded coin flips AFTER fitting, so CONTROL-slice
+    statistics diverge sharply from pooled statistics (models for treated
+    arms were fitted on the original labels, so their slices drop toward
+    chance while CONTROL stays separable). A correctly indexed
+    stratified-within-arm percentile bootstrap MUST bracket the pooled point
+    estimate for both ROC-AUC and Brier; the mis-indexed version cannot.
+    """
+    bundle, baseline, world = small_world
+    rng = np.random.default_rng(SEED)
+    hetero = world.copy()
+    treated_mask = hetero[ACTION_COLUMN] != "CONTROL"
+    flips = rng.integers(0, 2, size=int(treated_mask.sum()))
+    hetero[TARGET_COLUMN] = hetero[TARGET_COLUMN].astype(int)
+    hetero.loc[treated_mask, TARGET_COLUMN] = flips
+
+    result = evaluate_action_models(bundle, baseline, hetero, POLICY)
+
+    micro = result["micro_averaged"]
+    assert micro["n"] == len(world)
+    assert math.isfinite(micro["roc_auc"])
+    auc_lo, auc_hi = micro["roc_auc_ci95"]
+    assert auc_lo <= micro["roc_auc"] <= auc_hi
+    brier_lo, brier_hi = micro["brier_ci95"]
+    assert math.isfinite(micro["brier_model"])
+    assert brier_lo <= micro["brier_model"] <= brier_hi
+
+
 def test_evaluation_deterministic_across_two_calls(small_world):
     bundle, baseline, world = small_world
 

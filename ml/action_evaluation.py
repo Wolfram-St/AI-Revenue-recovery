@@ -243,9 +243,12 @@ def _stratified_bootstrap_cis(
     """Seeded stratified bootstrap 95% CIs for ROC-AUC and Brier.
 
     Resampling happens WITHIN each stratum (per-arm row blocks), mirroring
-    the D-M4 requirement; ``strata`` partitions the row positions of the
-    supplied arrays. Replicates that collapse to a single class contribute
-    NaN AUCs which the percentile step ignores.
+    the D-M4 requirement; ``strata`` partitions the row positions OF THE
+    SUPPLIED ARRAYS -- when callers pool several arm slices, every stratum
+    must be expressed as positions of the CONCATENATED array (running pool
+    offsets included), not as positions within its own source slice.
+    Replicates that collapse to a single class contribute NaN AUCs which the
+    percentile step ignores.
     """
     auc_statistics = np.full(replications, np.nan, dtype=float)
     brier_statistics = np.full(replications, np.nan, dtype=float)
@@ -475,11 +478,22 @@ def evaluate_action_models(
     pooled_p_hat = []
     pooled_p_baseline = []
     pooled_strata = []
+    # Defect fix (found by Task 6 canonical verification): stratum index
+    # arrays are applied against the CONCATENATED pool below, so each arm's
+    # block must carry its running pool offset. Without offsets every resample
+    # drew from the leading (CONTROL) segment and micro CIs could exclude the
+    # pooled point estimate; pinned by
+    # test_micro_average_bootstrap_ci_contains_point_estimate_under_heterogeneous_arms.
+    pool_offset = 0
     for arm in bundle.arms:
         block = arm_blocks[arm]
         if not block:
             continue
-        pooled_strata.append(np.arange(block["labels"].size, dtype=int))
+        n_block = int(block["labels"].size)
+        pooled_strata.append(
+            np.arange(pool_offset, pool_offset + n_block, dtype=int)
+        )
+        pool_offset += n_block
         pooled_labels.append(block["labels"])
         pooled_p_hat.append(block["p_hat"])
         pooled_p_baseline.append(block["p_baseline"])
