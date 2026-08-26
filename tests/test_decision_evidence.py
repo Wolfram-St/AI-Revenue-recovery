@@ -41,6 +41,7 @@ from data.splits import chronological_split
 from ml.action_model import (
     ACTION_COLUMN,
     ARM_ORDER,
+    ActionModelBundle,
     STRATUM_COLUMN,
     STRATUM_RANDOMIZED,
     calibrate_action_models,
@@ -55,7 +56,9 @@ from ml.decision_evidence import (
     _provenance_digest,
     _seed_variance_block,
     decision_evidence,
+    policy_safety_probe,
 )
+from ml.decision_policy import classify_optimizer_justification
 from ml.train import predict_recovery_probability, train_baseline
 from recovery.scoring import (
     RETRY_INTERVENTION_COST_INR,
@@ -95,6 +98,8 @@ TOP_KEYS = frozenset(
         "regret_quantiles",
         "arms",
         "uncertainty_inventory",
+        "policy_safety_probe_passed",
+        "policy_safety_probe_details",
         "provenance_digest",
     }
 )
@@ -762,6 +767,164 @@ def test_nonpositive_bootstrap_replications_raise_value_error(day6_world):
             seed=SEED,
             bootstrap_replications=0,
         )
+
+
+# ---------------------------------------------------------------------------
+# 5b. Native policy-safety probe (review fix F1) + Task-5 contract closure
+# ---------------------------------------------------------------------------
+
+PROBE_CONTEXT_NAMES = ("customer_opted_out", "fraud_risk", "hard_decline")
+
+
+class _FixedProbabilityPipeline:
+    """Deterministic stand-in arm pipeline for adversarial/degenerate probes."""
+
+    def __init__(self, probability: float):
+        self._probability = float(probability)
+
+    def predict_proba(self, X) -> np.ndarray:
+        rows = len(X)
+        return np.column_stack(
+            [
+                np.full(rows, 1.0 - self._probability),
+                np.full(rows, self._probability),
+            ]
+        )
+
+
+def _stub_action_bundle(probabilities: dict[str, float]) -> ActionModelBundle:
+    return ActionModelBundle(
+        models={
+            arm: _FixedProbabilityPipeline(probabilities[arm]) for arm in ARM_ORDER
+        },
+        arms=ARM_ORDER,
+        metadata={"stub": "fixed_probability_pipeline"},
+    )
+
+
+def test_report_embeds_native_passing_probe(day6_world):
+    report = day6_world["report"]
+
+    assert report["policy_safety_probe_passed"] is True
+    details = report["policy_safety_probe_details"]
+    assert [entry["context"] for entry in details] == list(PROBE_CONTEXT_NAMES)
+    assert all(entry["authorized"] == "STOP" for entry in details)
+    assert all(entry["candidate"] in TREATED_ARMS for entry in details)
+    assert all(entry["overrode"] is True for entry in details)
+
+
+def test_policy_safety_probe_direct_call_contract_and_determinism(day6_world):
+    bundle = day6_world["calibrated_bundle"]
+
+    probe = policy_safety_probe(bundle)
+    again = policy_safety_probe(bundle)
+
+    assert set(probe) == {
+        "policy_safety_probe_passed",
+        "probe_details",
+        "label",
+    }
+    assert probe["label"] == "OBSERVED SIMULATED OUTCOME"
+    assert probe["policy_safety_probe_passed"] is True
+    assert len(probe["probe_details"]) == 3
+    assert json.dumps(probe, sort_keys=True, allow_nan=False) == json.dumps(
+        again, sort_keys=True, allow_nan=False
+    )
+
+
+def test_probe_rejects_non_bundle_and_bad_policy_config(day6_world):
+    with pytest.raises(ValueError, match="ActionModelBundle"):
+        policy_safety_probe({"models": {}})
+
+    with pytest.raises(ValueError, match="PolicyConfig"):
+        policy_safety_probe(
+            day6_world["calibrated_bundle"], policy_config={"rules": []}
+        )
+
+
+def test_adversarial_stub_favoring_treatment_cannot_authorize_non_stop():
+    """Dominance pin: even a bundle engineered so every treated arm looks
+    wildly better than CONTROL (positive candidate revenue everywhere, high
+    injected recovery_probability) cannot move any authorized action off
+    STOP -- the recommendation layer NEVER overrides policy."""
+    adversarial = _stub_action_bundle(
+        {
+            "CONTROL": 0.01,
+            "RETRY_NOW": 0.99,
+            "RETRY_LATER": 0.98,
+            "REQUEST_UPDATE": 0.97,
+            "HUMAN_REVIEW": 0.96,
+        }
+    )
+
+    probe = policy_safety_probe(adversarial)
+
+    assert probe["policy_safety_probe_passed"] is True
+    for entry in probe["probe_details"]:
+        assert entry["authorized"] == "STOP"
+        assert entry["candidate"] in TREATED_ARMS
+        assert entry["overrode"] is True
+
+
+def test_degenerate_tie_bundle_still_stops_and_perturbs_digest(day6_world):
+    """All-equal probabilities force the ARM_ORDER tie-break candidate
+    (RETRY_NOW); every context still authorizes STOP so the gate passes.
+    The probe verdict lives INSIDE the hashed content: recomputing the
+    sorted-json digest over a tampered probe block must NOT reproduce the
+    stored digest, and the degenerate world's digest differs from the
+    honest canonical run's digest."""
+    degenerate = _stub_action_bundle({arm: 0.50 for arm in ARM_ORDER})
+
+    degenerate_report = decision_evidence(
+        degenerate, day6_world["test_obs"], POLICY, seed=SEED
+    )
+    honest_report = day6_world["report"]
+
+    assert degenerate_report["policy_safety_probe_passed"] is True
+    assert honest_report["policy_safety_probe_passed"] is True
+    tie_candidates = {
+        entry["candidate"]
+        for entry in degenerate_report["policy_safety_probe_details"]
+    }
+    assert tie_candidates == {"RETRY_NOW"}
+
+    digest_source = {
+        key: value
+        for key, value in degenerate_report.items()
+        if key != "provenance_digest"
+    }
+    assert _provenance_digest(digest_source) == (
+        degenerate_report["provenance_digest"]
+    )
+    tampered_probe = [
+        {**entry, "authorized": "RETRY_LATER"}
+        for entry in degenerate_report["policy_safety_probe_details"]
+    ]
+    assert _provenance_digest(
+        {**digest_source, "policy_safety_probe_details": tampered_probe}
+    ) != degenerate_report["provenance_digest"]
+
+    assert (
+        degenerate_report["provenance_digest"]
+        != honest_report["provenance_digest"]
+    )
+
+
+def test_genuine_evidence_satisfies_the_task5_classifier_contract(day6_world):
+    """Contract-defect regression pin (review F1): the Task 5 classifier
+    REQUIRES policy_safety_probe_passed; before this fix the GENUINE
+    decision_evidence output raised ValueError naming that missing key, so
+    no canonical bundle could ever pass the gate. The genuine report must
+    validate structurally and its probe criterion must PASS."""
+    verdict = classify_optimizer_justification(day6_world["report"])
+
+    probe_criteria = [
+        entry
+        for entry in verdict["criteria"]
+        if entry["criterion"] == "policy_safety_probe_passed"
+    ]
+    assert len(probe_criteria) == 1
+    assert probe_criteria[0]["passed"] is True
 
 
 # ---------------------------------------------------------------------------

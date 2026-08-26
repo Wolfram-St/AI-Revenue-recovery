@@ -58,6 +58,16 @@ Metrics (all on the shared randomized row block):
    computed over the report EXCLUDING the digest field itself, so
    downstream consumers can detect non-canonical bundles visibly.
 
+Native policy-safety probe (D-E5 criterion 3 producer): the report embeds
+``policy_safety_probe(calibrated_bundle)`` output -- three canonical STOP
+contexts (customer opted out / fraud risk / hard decline) replayed through
+the bundle's counterfactual revenues and the frozen business rules via
+``recovery.policy.decide_action``, passing only when EVERY context
+authorizes STOP regardless of the revenue candidate. The Task 5 classifier
+(``ml/decision_policy``) consumes this field, so genuine bundles satisfy the
+classifier's structure by construction instead of relying on callers to
+attach a hand-made probe result.
+
 Determinism: the ONLY stochastic consumer is the stratified bootstrap, whose
 generator is derived EXACTLY once from the named ``seed`` parameter via
 ``np.random.default_rng(seed)`` (default 20260826); two calls with identical
@@ -95,6 +105,11 @@ from ml.action_model import (
     STRATUM_RANDOMIZED,
     ActionModelBundle,
     predict_action_probability,
+)
+from recovery.policy import (
+    PolicyConfig,
+    decide_action,
+    load_policy_config,
 )
 from recovery.scoring import (
     RETRY_INTERVENTION_COST_INR,
@@ -163,6 +178,142 @@ SEED_VARIANCE_NOT_COMPUTED_NOTE = (
     "filled by caller: supply per-seed stability replicates (D-E1 runs) to "
     "compute spread across seeds"
 )
+
+POLICY_SAFETY_PROBE_NOTE = (
+    "three canonical STOP contexts replayed through the calibrated bundle's "
+    "counterfactual revenues and the frozen business rules; the gate passes "
+    "only when EVERY context authorizes STOP regardless of the revenue "
+    "candidate"
+)
+
+_PROBE_BASE_CONTEXT = {
+    "amount_inr": 2500.0,
+    "attempt_number": 1,
+    "customer_tenure_days": 365,
+    "successful_payment_count": 2,
+    "failed_payment_count": 1,
+    "historical_recovery_count": 1,
+    "customer_opted_out": False,
+    "fraud_risk": False,
+    "payment_method": "card",
+    "failure_code": "generic_decline",
+    "failure_category": "temporary_decline",
+    "issuer_response": "do_not_honor",
+    "device_type": "mobile",
+    "country": "US",
+    # Label column read by the shared feature builder; ignored for queries.
+    "recovered": 0,
+}
+
+_PROBE_CONTEXT_OVERRIDES = (
+    ("customer_opted_out", {"customer_opted_out": True}),
+    ("fraud_risk", {"fraud_risk": True}),
+    ("hard_decline", {"failure_category": "hard_decline"}),
+)
+
+
+def policy_safety_probe(
+    calibrated_bundle: ActionModelBundle,
+    policy_config: PolicyConfig | None = None,
+    seed: int = 20260826,
+) -> dict:
+    """Replay three canonical STOP contexts through bundle + business rules.
+
+    For each crafted context -- customer opted out, fraud risk, hard decline
+    -- per-arm MODEL ESTIMATE probabilities are queried exactly like the
+    ``decision_evidence`` conventions (single-row frame COPY whose
+    ``assigned_action`` column is OVERWRITTEN per queried arm), converted to
+    incremental revenue with the imported Day-2 cost basis, and argmaxed
+    over the four treated arms with ``ARM_ORDER`` tie-breaking. The TOP
+    ARM's model probability is injected as ``recovery_probability``
+    (documented choice mirroring ``ml/decision_policy``) and the frozen
+    business rules authorize the final action through
+    ``recovery.policy.decide_action``.
+
+    Emits exactly::
+
+        {
+            "policy_safety_probe_passed": bool,   # EVERY context -> STOP
+            "probe_details": [{context, candidate, authorized, overrode}],
+            "label": "OBSERVED SIMULATED OUTCOME",
+        }
+
+    STOP dominance holds regardless of candidate revenue: an adversarial
+    bundle can move the candidate but never the authorized verdict.
+    Deterministic: consumes NO randomness (``seed`` exists for interface
+    stability only); identical inputs reproduce byte-identical output.
+    Synthetic-world-only; supports nothing causal about production.
+    """
+    if not isinstance(calibrated_bundle, ActionModelBundle):
+        raise ValueError(
+            "calibrated_bundle must be an ActionModelBundle, got "
+            f"{type(calibrated_bundle).__name__}"
+        )
+    unknown_arms = sorted(set(calibrated_bundle.arms) - set(ARM_ORDER))
+    if unknown_arms:
+        raise ValueError(
+            f"bundle carries non-canonical arms: {unknown_arms}"
+        )
+    if policy_config is None:
+        policy = load_policy_config()
+    else:
+        if not isinstance(policy_config, PolicyConfig):
+            raise ValueError(
+                "policy_config must be a recovery.policy.PolicyConfig, got "
+                f"{type(policy_config).__name__}"
+            )
+        policy = policy_config
+
+    details: list[dict] = []
+    for context_name, overrides in _PROBE_CONTEXT_OVERRIDES:
+        row = {**_PROBE_BASE_CONTEXT, **overrides}
+        query_frame = pd.DataFrame([row])
+        probabilities = {}
+        for arm in ARM_ORDER:
+            counterfactual = query_frame.copy()
+            counterfactual[ACTION_COLUMN] = arm
+            probabilities[arm] = float(
+                predict_action_probability(calibrated_bundle, counterfactual, arm)[0]
+            )
+
+        amount = float(row["amount_inr"])
+        category = row["failure_category"]
+        risk_penalty = (
+            UNKNOWN_CATEGORY_RISK_FRACTION * amount
+            if category == "unknown"
+            else 0.0
+        )
+        revenues = {
+            arm: (
+                (probabilities[arm] - probabilities["CONTROL"]) * amount
+                - RETRY_INTERVENTION_COST_INR
+                - risk_penalty
+            )
+            for arm in TREATED_ARMS
+        }
+        candidate = TREATED_ARMS[0]
+        for arm in TREATED_ARMS[1:]:
+            if revenues[arm] > revenues[candidate]:
+                candidate = arm
+
+        decision = decide_action(
+            {**row, "recovery_probability": probabilities[candidate]}, policy
+        )
+        details.append(
+            {
+                "context": context_name,
+                "candidate": candidate,
+                "authorized": decision.authorized_action,
+                "overrode": decision.authorized_action != candidate,
+            }
+        )
+
+    passed = all(entry["authorized"] == "STOP" for entry in details)
+    return {
+        "policy_safety_probe_passed": bool(passed),
+        "probe_details": details,
+        "label": LABEL_OBSERVED,
+    }
 
 
 def _require_treated_arm_columns(frame: pd.DataFrame, name: str) -> None:
@@ -506,10 +657,14 @@ def decision_evidence(
     with per-row regret quantiles p50/p90/p99, per-arm stratified-bootstrap
     CIs around mean model revenue with pairwise overlap lists, and an
     uncertainty inventory whose calibration status warns loudly on raw
-    bundles. The report self-hashes into ``provenance_digest`` (sorted-json
-    SHA256 excluding the digest field itself). ``stability_runs``, when
-    supplied, must hold >= 2 per-seed replicate dicts and yields population
-    sds of match rate / relative regret / per-arm mean model revenue.
+    bundles. It also runs the native ``policy_safety_probe`` over three
+    canonical STOP contexts and embeds its verdict as the top-level
+    ``policy_safety_probe_passed`` / ``policy_safety_probe_details`` keys,
+    INSIDE the provenance content: the report self-hashes into
+    ``provenance_digest`` (sorted-json SHA256 excluding the digest field
+    itself). ``stability_runs``, when supplied, must hold >= 2 per-seed
+    replicate dicts and yields population sds of match rate / relative
+    regret / per-arm mean model revenue.
 
     Nothing mutates its inputs; the ONLY randomness is the single named-
     seed bootstrap stream; identical inputs reproduce byte-identical
@@ -626,6 +781,8 @@ def decision_evidence(
         "seed_variance": _seed_variance_block(stability_runs),
     }
 
+    probe = policy_safety_probe(calibrated_bundle)
+
     report = {
         "label": LABEL_OBSERVED,
         "truth_label": TRUTH_LABEL,
@@ -655,6 +812,8 @@ def decision_evidence(
         "regret_quantiles": core["regret_quantiles"],
         "arms": arms_block,
         "uncertainty_inventory": inventory,
+        "policy_safety_probe_passed": probe["policy_safety_probe_passed"],
+        "policy_safety_probe_details": probe["probe_details"],
     }
     report["provenance_digest"] = _provenance_digest(
         {key: value for key, value in report.items() if key != "provenance_digest"}
