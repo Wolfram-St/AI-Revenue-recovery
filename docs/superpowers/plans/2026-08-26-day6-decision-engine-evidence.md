@@ -71,7 +71,7 @@ Fractions {0.25, 0.50, 1.00} apply to the TRAIN segment only; calibration at eve
 
 **Files:** Create `simulation/cli.py`; Modify `.gitignore`; Test `tests/test_cli.py`
 
-Subcommands per D-E3. Tests: generate→file exists+header exact+row count; same-seed sha256 byte-identical twice; different seed → different file but validator valid; validate subcommand returns report valid:true on good CSV, false on tampered CSV; summary JSON parses with labels; --help works; unknown subcommand exits non-zero; AST-based purity: simulation+stdlib+EXACTLY the three documented ml baseline imports (ml.train.train_baseline, ml.evaluate.calibrate_model, ml.train.predict_recovery_probability) allowed; action-model/comparison modules forbidden per D-E3.
+Subcommands per D-E3. Tests: generate→file exists+header exact+row count; same DATASET-seed sha256 byte-identical twice; different seed → different file but validator valid; validate subcommand returns report valid:true on good CSV, false on tampered CSV; summary JSON parses with labels; --help works; unknown subcommand exits non-zero; seed-semantics output fields present (dataset_seed + policy master_seed recorded distinctly); AST-based purity: simulation+stdlib+EXACTLY the three documented ml baseline imports (ml.train.train_baseline, ml.evaluate.calibrate_model, ml.train.predict_recovery_probability) allowed; action-model/comparison modules forbidden per D-E3.
 
 - [ ] RED → GREEN → FULL → Docker → review → commit `feat: add reproducible treatment outcome CLI`
 
@@ -79,7 +79,7 @@ Subcommands per D-E3. Tests: generate→file exists+header exact+row count; same
 
 **Files:** Create `ml/pooled_model.py`; Test `tests/test_pooled_model.py`
 
-Interfaces mirroring Day 5 discipline: `train_pooled_model(train_frame, validation_frame, seed=...) -> (PooledModelBundle, metadata)` (features = build_feature_matrix X + assigned_action categorical; y = simulated_recovered EXPLICIT; zero-randomized-row ValueError impossible but guarded); `calibrate_pooled_model(bundle, validation_frame)`; `predict_pooled_probability(bundle, context_frame, action)` (sets action column to requested arm — counterfactual query semantics, documented). Metadata: pooled row counts, small_segments, seed. Tests: target discipline (wrong-label fixture), stratum exclusion, reproducibility, bounds, counterfactual-query semantics (same context different action → different probability generally), calibration immutability, purity.
+Interfaces mirroring Day 5 discipline: `train_pooled_model(train_frame, validation_frame, seed=...) -> (PooledModelBundle, metadata)` (features = build_feature_matrix X + assigned_action categorical; y = simulated_recovered EXPLICIT; zero-randomized-row ValueError impossible but guarded); `calibrate_pooled_model(bundle, validation_frame)`; `predict_pooled_probability(bundle, context_frame, action)` — OVERWRITES the existing assigned_action column ON A COPY to the requested arm (counterfactual query semantics, documented); caller's frame never mutated (tested). Metadata: pooled row counts, small_segments, seed. Tests: target discipline (wrong-label fixture), stratum exclusion, reproducibility, bounds, counterfactual-query semantics (same context different action → different probability generally), predict-time input-frame immutability test + calibration immutability, purity.
 
 - [ ] RED → GREEN → FULL → Docker → review → commit `feat: add pooled action-feature model as comparison candidate`
 
@@ -95,7 +95,7 @@ Interfaces mirroring Day 5 discipline: `train_pooled_model(train_frame, validati
 
 **Files:** Create `ml/decision_evidence.py`; Test `tests/test_decision_evidence.py`
 
-Implements D-E4 metrics over the CALIBRATED per-arm bundle + pooled twin (both reported): decision-match rate, relative regret, bootstrap CIs per treated arm incremental revenue, CI-overlap matrix, uncertainty inventory. Tests: hand-computed constant-probability fixtures (perfect match rate 1.0; adversarial mis-ordering fixture → match rate low); regret math hand-checked; CI overlap counting; determinism; purity.
+Implements D-E4 metrics over the CALIBRATED per-arm bundle + pooled twin (both reported): decision-match rate, relative regret, bootstrap CIs per treated arm incremental revenue, CI-overlap matrix, uncertainty inventory. The emitted evidence bundle carries `provenance_digest` (sorted-json SHA of its own content) - computed here, consumed/validated by the Task 5 classifier. Tests: hand-computed constant-probability fixtures (perfect match rate 1.0; adversarial mis-ordering fixture → match rate low); regret math hand-checked; CI overlap counting; determinism; purity; provenance_digest present + classifier validation behavior.
 
 - [ ] RED → GREEN → FULL → Docker → review → commit `feat: quantify decision quality and uncertainty against synthetic ground truth`
 
