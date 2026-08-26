@@ -38,7 +38,7 @@ pre-fix cba0d81d… retained as history).
 
 ## Final gate
 
-**DAY 5 = GO** — see the DAY5_RESULTS.md gate table. The micro-CI defect
+**DAY 5 = GO** � whole-branch review APPROVE (11/11 dimensions pass; 0 CRITICAL/IMPORTANT; deferred MINORs: interaction-column assertion guard, is_truth/label consistency check, fingerprint-fallback documentation, raw-AUC sentence completeness).
 found during canonical capture is recorded FOUND → DIAGNOSED (pool-offset
 strata bug: every pooled resample drew from the leading CONTROL segment) →
 FIXED within Day 5 (running-offset strata in `ml/action_evaluation.py`;
