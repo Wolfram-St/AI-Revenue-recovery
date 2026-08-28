@@ -714,3 +714,242 @@ def run_solver_preflight_benchmark(
         "solver_type": "exact_dp_2d",
         "exactness": exactness
     }
+
+
+def authorize_post_allocation(
+    allocated: dict[str, CandidatePair],
+    unallocated_reasons: dict[str, str],
+    pre_screened_entries: dict[str, "PortfolioEntry"],
+    eligible_attempt_ids: set[str],
+    all_candidates: tuple[CandidatePair, ...],
+    policy: PolicyConfig,
+    candidate_frame: "pd.DataFrame",
+) -> "PortfolioAllocation":
+    """Apply post-allocation deterministic policy authorization to every row.
+
+    Stage 2 of the two-stage policy pipeline:
+    - Pre-screened rows (Stage 1) are passed through unchanged.
+    - Invalid prediction rows are passed through unchanged.
+    - Allocated rows: inject selected-arm probability, run full decide_action().
+    - Unallocated eligible rows: inject CONTROL probability, run full decide_action().
+
+    The allocation accounting (budget, HR, optimizer_recommendation) is frozen
+    before authorization. Policy authorization changes the authorized_action
+    outcome but does NOT modify the optimizer allocation accounting.
+
+    Returns a complete PortfolioAllocation with entries and summary.
+    """
+    from ml.portfolio_audit import PortfolioEntry, PortfolioSummary, PortfolioAllocation
+
+    # Build candidates lookup by attempt_id
+    from collections import defaultdict
+    by_row: dict[str, list[CandidatePair]] = defaultdict(list)
+    for c in all_candidates:
+        by_row[c.attempt_id].append(c)
+
+    # Build lookup for all candidates' probabilities
+    p_hat_control_by_row: dict[str, float] = {}
+    for aid, cands in by_row.items():
+        if cands:
+            p_hat_control_by_row[aid] = cands[0].p_hat_control
+
+    # Build row data lookup from the candidate frame
+    row_data: dict[str, dict] = {}
+    for _, frame_row in candidate_frame.iterrows():
+        aid = frame_row["attempt_id"]
+        row_data[aid] = {col: frame_row[col] for col in PRE_ALLOCATION_POLICY_COLUMNS if col in frame_row}
+        row_data[aid]["amount_inr"] = float(frame_row["amount_inr"])
+        row_data[aid]["failure_category"] = str(frame_row["failure_category"])
+
+    entries: list[PortfolioEntry] = []
+    total_overrides = 0
+    total_stop_overrides = 0
+    post_policy_net_authorized = 0
+    rec_counts: dict[str, int] = defaultdict(int)
+    auth_counts: dict[str, int] = defaultdict(int)
+
+    # Process all rows in deterministic order
+    all_attempt_ids = sorted(set(
+        list(pre_screened_entries.keys()) +
+        list(allocated.keys()) +
+        [aid for aid in unallocated_reasons.keys() if aid not in pre_screened_entries]
+    ))
+
+    for aid in all_attempt_ids:
+        if aid in pre_screened_entries:
+            # Stage 1 pre-screened rows: pass through unchanged
+            entry = pre_screened_entries[aid]
+            entries.append(entry)
+            rec_counts[entry.optimizer_recommendation] += 1
+            auth_counts[entry.authorized_action] += 1
+            continue
+
+        if aid in allocated:
+            # Allocated row: inject selected-arm probability
+            cand = allocated[aid]
+            recovery_prob = cand.p_hat_arm
+            optimizer_rec = cand.arm
+        else:
+            # Unallocated eligible row: inject CONTROL probability
+            recovery_prob = p_hat_control_by_row.get(aid, 0.0)
+            optimizer_rec = "NO_INTERVENTION"
+
+        # Build full policy context from row data
+        context: dict = {"recovery_probability": recovery_prob}
+        if aid in row_data:
+            context.update(row_data[aid])
+
+        # Run full decide_action
+        decision = decide_action(context, policy)
+        authorized = decision.authorized_action
+        auth_reason = decision.reason
+        matched_rule = decision.matched_rule_id
+
+        # Determine policy override
+        if aid in allocated:
+            policy_overrode = authorized != optimizer_rec
+            # Build the entry from the allocated candidate
+            cands = by_row[aid]
+            gross_by_arm = {c.arm: c.gross_incremental_value_inr for c in cands}
+            cost_by_arm = {c.arm: c.action_cost_inr for c in cands}
+            net_by_arm = {c.arm: c.net_incremental_value_inr for c in cands}
+
+            # Determine sort rank
+            sorted_candidates = rank_candidate_pairs(tuple(cands))
+            sort_rank = None
+            for rank_idx, sc in enumerate(sorted_candidates, 1):
+                if sc.arm == cand.arm:
+                    sort_rank = rank_idx
+                    break
+
+            entry = PortfolioEntry(
+                attempt_id=aid,
+                payment_id=cand.payment_id,
+                row_index=cand.row_index,
+                optimizer_recommendation=optimizer_rec,
+                no_intervention_reason=None,
+                gross_incremental_value_by_arm=gross_by_arm,
+                action_cost_by_arm=cost_by_arm,
+                net_incremental_value_by_arm=net_by_arm,
+                selected_gross_incremental_value_inr=cand.gross_incremental_value_inr,
+                selected_action_cost_inr=cand.action_cost_inr,
+                selected_action_cost_paise=cand.action_cost_paise,
+                selected_net_incremental_value_inr=cand.net_incremental_value_inr,
+                optimizer_sort_rank=sort_rank,
+                authorized_action=authorized,
+                authorization_reason=auth_reason,
+                matched_rule_id=matched_rule,
+                policy_overrode_recommendation=policy_overrode,
+            )
+        else:
+            # Unallocated row
+            policy_overrode = False
+            cands = by_row.get(aid, [])
+            gross_by_arm = {c.arm: c.gross_incremental_value_inr for c in cands}
+            cost_by_arm = {c.arm: c.action_cost_inr for c in cands}
+            net_by_arm = {c.arm: c.net_incremental_value_inr for c in cands}
+            reason = unallocated_reasons.get(aid, "unknown")
+
+            # Get payment_id and row_index from frame data if available
+            payment_id = row_data.get(aid, {}).get("payment_id", "")
+            row_idx = 0
+            if aid in row_data:
+                # Find row_index from candidates or frame
+                if cands:
+                    row_idx = cands[0].row_index
+
+            entry = PortfolioEntry(
+                attempt_id=aid,
+                payment_id=payment_id if payment_id else (cands[0].payment_id if cands else ""),
+                row_index=row_idx,
+                optimizer_recommendation="NO_INTERVENTION",
+                no_intervention_reason=reason,
+                gross_incremental_value_by_arm=gross_by_arm,
+                action_cost_by_arm=cost_by_arm,
+                net_incremental_value_by_arm=net_by_arm,
+                selected_gross_incremental_value_inr=None,
+                selected_action_cost_inr=None,
+                selected_action_cost_paise=None,
+                selected_net_incremental_value_inr=None,
+                optimizer_sort_rank=None,
+                authorized_action=authorized,
+                authorization_reason=auth_reason,
+                matched_rule_id=matched_rule,
+                policy_overrode_recommendation=policy_overrode,
+            )
+
+        entries.append(entry)
+        rec_counts[entry.optimizer_recommendation] += 1
+        auth_counts[entry.authorized_action] += 1
+
+        if policy_overrode:
+            total_overrides += 1
+            if authorized == "STOP":
+                total_stop_overrides += 1
+
+        if authorized != "STOP":
+            post_policy_net_authorized += 1
+
+    # Build summary from allocation metadata
+    budget_limit_paise = None
+    budget_limit_inr = None
+    budget_allocated_paise = 0
+    budget_allocated_inr = 0.0
+    budget_remaining_paise = None
+    budget_remaining_inr = None
+    hr_capacity_limit = None
+    hr_allocated_count = 0
+
+    # Reconstruct budget/HR from allocation
+    for cand in allocated.values():
+        budget_allocated_paise += cand.action_cost_paise
+        if cand.arm == "HUMAN_REVIEW":
+            hr_allocated_count += 1
+
+    budget_allocated_inr = budget_allocated_paise / 100.0
+
+    # Count buckets
+    pre_screen_count = len(pre_screened_entries)
+    invalid_pred_count = sum(
+        1 for e in pre_screened_entries.values()
+        if e.no_intervention_reason == "invalid_prediction"
+    )
+    optimizer_allocated_count = len(allocated)
+    no_intervention_count = len([
+        aid for aid in all_attempt_ids
+        if aid not in allocated and aid not in pre_screened_entries
+    ])
+
+    total_rows = pre_screen_count + optimizer_allocated_count + no_intervention_count
+
+    summary = PortfolioSummary(
+        total_rows=total_rows,
+        pre_screen_stopped_count=pre_screen_count - invalid_pred_count,
+        invalid_prediction_count=invalid_pred_count,
+        optimizer_allocated_count=optimizer_allocated_count,
+        no_intervention_count=no_intervention_count,
+        eligible_candidate_count=len(set(c.attempt_id for c in all_candidates)),
+        budget_limit_inr=budget_limit_inr,
+        budget_limit_paise=budget_limit_paise,
+        budget_allocated_inr=budget_allocated_inr,
+        budget_allocated_paise=budget_allocated_paise,
+        budget_remaining_inr=budget_remaining_inr,
+        budget_remaining_paise=budget_remaining_paise,
+        human_review_capacity_limit=hr_capacity_limit,
+        human_review_allocated_count=hr_allocated_count,
+        post_policy_net_authorized_count=post_policy_net_authorized,
+        total_policy_overrides=total_overrides,
+        total_policy_stop_overrides=total_stop_overrides,
+        optimizer_objective_value_inr=sum(
+            c.net_incremental_value_inr for c in allocated.values()
+        ),
+        optimizer_status="success" if allocated or not all_attempt_ids else "empty_portfolio",
+        action_recommendation_counts=dict(rec_counts),
+        action_authorized_counts=dict(auth_counts),
+    )
+
+    return PortfolioAllocation(
+        entries=tuple(entries),
+        summary=summary,
+        metadata={"post_allocation_policy": True},
+    )

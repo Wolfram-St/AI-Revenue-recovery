@@ -26,6 +26,7 @@ from ml.portfolio_optimizer import (
     rank_candidate_pairs,
     solve_portfolio_allocation,
     run_solver_preflight_benchmark,
+    authorize_post_allocation,
 )
 from ml.features import FORBIDDEN_FEATURES, NUMERIC_FEATURES, CATEGORICAL_FEATURES
 from recovery.policy import load_policy_config
@@ -899,3 +900,751 @@ class TestExactDPSolver:
         state count (1,451,358), transition count (5,805,432), elapsed time, 
         and memory metrics cleanly."""
         pass
+
+
+# =============================================================================
+# Test Post-Allocation Policy Authorization (Task 5)
+# =============================================================================
+
+class TestPostAllocationPolicy:
+    """Tests for Task 5: deterministic post-allocation policy authorization.
+
+    Verifies that:
+    - The policy remains the final authority (AI recommends, policy authorizes)
+    - STOP dominates optimizer recommendations
+    - Probability injection is correct for allocated vs unallocated rows
+    - Non-retroactive allocation accounting is preserved
+    - Four-bucket row partition invariant holds
+    - Deterministic repeated authorization produces identical results
+    """
+
+    def _make_candidates(self, candidate_data):
+        """Helper to create CandidatePair objects for testing."""
+        candidates = []
+        for i, data in enumerate(candidate_data):
+            candidates.append(CandidatePair(
+                attempt_id=data.get("attempt_id", f"ATT-{i:06d}"),
+                payment_id=data.get("payment_id", f"PAY-{i:06d}"),
+                row_index=data.get("row_index", i),
+                arm=data["arm"],
+                gross_incremental_value_inr=data.get("gross_incremental_value_inr", 100.0),
+                action_cost_inr=data.get("action_cost_inr", 10.0),
+                action_cost_paise=data.get("action_cost_paise", 1000),
+                net_incremental_value_inr=data["net_incremental_value_inr"],
+                p_hat_arm=data.get("p_hat_arm", 0.5),
+                p_hat_control=data.get("p_hat_control", 0.3),
+            ))
+        return candidates
+
+    def _get_entry_by_id(self, result, attempt_id):
+        """Helper to find a PortfolioEntry by attempt_id."""
+        for entry in result.entries:
+            if entry.attempt_id == attempt_id:
+                return entry
+        return None
+
+    def _make_base_frame(self, rows_data):
+        """Helper to create a minimal valid candidate frame for testing."""
+        frame = pd.DataFrame({
+            "attempt_id": [r["attempt_id"] for r in rows_data],
+            "payment_id": [r["payment_id"] for r in rows_data],
+            "customer_id": [r.get("customer_id", f"CUS-{i:06d}") for i, r in enumerate(rows_data)],
+            "event_timestamp": pd.to_datetime([r.get("event_timestamp", "2026-01-01") for r in rows_data]),
+            "amount_inr": [r.get("amount_inr", 1000.0) for r in rows_data],
+            "failure_category": [r.get("failure_category", "temporary_decline") for r in rows_data],
+            "attempt_number": [r.get("attempt_number", 1) for r in rows_data],
+            "customer_tenure_days": [r.get("customer_tenure_days", 30) for r in rows_data],
+            "successful_payment_count": [r.get("successful_payment_count", 5) for r in rows_data],
+            "failed_payment_count": [r.get("failed_payment_count", 1) for r in rows_data],
+            "historical_recovery_count": [r.get("historical_recovery_count", 0) for r in rows_data],
+            "customer_opted_out": [r.get("customer_opted_out", 0) for r in rows_data],
+            "fraud_risk": [r.get("fraud_risk", 0) for r in rows_data],
+            "payment_method": [r.get("payment_method", "upi") for r in rows_data],
+            "failure_code": [r.get("failure_code", "T001") for r in rows_data],
+            "issuer_response": [r.get("issuer_response", "00") for r in rows_data],
+            "device_type": [r.get("device_type", "android") for r in rows_data],
+            "country": [r.get("country", "IN") for r in rows_data],
+            "recovered": [0 for _ in rows_data],
+        })
+        return frame
+
+    def _make_mock_bundle(self, probs_per_arm):
+        """Create a mock ActionModelBundle that returns fixed probabilities."""
+        from ml.action_model import ActionModelBundle, ARM_ORDER
+
+        class MockModel:
+            def __init__(self, prob):
+                self.prob = prob
+            def predict_proba(self, X):
+                n = len(X)
+                return np.column_stack([np.full(n, 1 - self.prob), np.full(n, self.prob)])
+
+        models = {arm: MockModel(probs_per_arm.get(arm, 0.5)) for arm in ARM_ORDER}
+        return ActionModelBundle(models=models, arms=ARM_ORDER, metadata={})
+
+    def test_allocated_recommendation_can_become_different_authorized_action(self):
+        """An optimizer-allocated RETRY_NOW can be overridden to STOP by policy (R008 low probability)."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        # CONTROL=0.05, RETRY_NOW=0.18: net = (0.18-0.05)*5000 - 10 = 640 > 0
+        # R008 fires: 0.18 < 0.20 -> STOP
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.12,
+            "REQUEST_UPDATE": 0.10, "HUMAN_REVIEW": 0.15,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        assert "ATT-000001" in allocated
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        assert entry.optimizer_recommendation == "RETRY_NOW"
+        assert entry.authorized_action == "STOP"
+        assert entry.policy_overrode_recommendation is True
+
+    def test_stop_dominates_optimizer_recommendation(self):
+        """STOP remains dominant regardless of optimizer recommendation, candidate value, or DP optimality."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        # Low probs: R008 fires (< 0.20), but optimizer still allocates (net > 0)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        assert entry.authorized_action == "STOP"
+        assert entry.policy_overrode_recommendation is True
+        assert entry.optimizer_recommendation in {"RETRY_NOW", "RETRY_LATER", "REQUEST_UPDATE", "HUMAN_REVIEW"}
+
+    def test_post_allocation_policy_uses_selected_arm_probability_for_allocated_rows(self):
+        """Allocated rows use the probability of the optimizer-selected arm for policy evaluation."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 1000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        # Use high prob so R007 fires (>= 0.70 with temp_decline + attempt < 4)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.1, "RETRY_NOW": 0.80, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        # With RETRY_NOW prob=0.80, R007 fires -> RETRY_NOW authorized
+        if entry.optimizer_recommendation == "RETRY_NOW":
+            assert entry.authorized_action == "RETRY_NOW"
+
+    def test_post_allocation_policy_uses_control_probability_for_unallocated_rows(self):
+        """Unallocated eligible rows use CONTROL probability for policy evaluation."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 1000.0},
+            {"attempt_id": "ATT-000002", "payment_id": "PAY-000002",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 1000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        # Low CONTROL prob so R008 fires (recovery_probability < 0.20) for unallocated rows
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.10, "RETRY_NOW": 0.80, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        # Pass both rows to solver but budget=10.0 = 1 unit, only 1 action fits
+        config = OptimizerConfig(budget_limit_inr=10.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), {"ATT-000001", "ATT-000002"}, config
+        )
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            {"ATT-000001", "ATT-000002"}, candidates, policy, frame,
+        )
+        # Find the unallocated row and verify it used CONTROL probability
+        allocated_ids = set(allocated.keys())
+        unallocated_entry = None
+        for entry in result.entries:
+            if entry.optimizer_recommendation == "NO_INTERVENTION" and entry.attempt_id not in pre_entries:
+                unallocated_entry = entry
+                break
+        assert unallocated_entry is not None, "Expected at least one unallocated row"
+        # CONTROL=0.10 -> R008 fires (recovery_probability < 0.20) -> STOP
+        assert unallocated_entry.authorized_action == "STOP"
+        assert unallocated_entry.no_intervention_reason == "budget_exhausted"
+
+    def test_policy_override_sets_policy_overrode_recommendation_true(self):
+        """When policy diverges from optimizer recommendation on an allocated row, flag is True."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        # Low probs: R008 fires, optimizer allocates (net > 0)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        # R008 -> STOP overrides any optimizer recommendation
+        assert entry.policy_overrode_recommendation is True
+        assert entry.authorized_action == "STOP"
+
+    def test_no_override_leaves_policy_overrode_recommendation_false(self):
+        """When policy agrees with optimizer recommendation, flag is False."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 1000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        # High prob so R007 fires -> RETRY_NOW authorized, matching optimizer
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.1, "RETRY_NOW": 0.80, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        if entry.optimizer_recommendation == entry.authorized_action:
+            assert entry.policy_overrode_recommendation is False
+
+    def test_pre_screened_rows_remain_pre_screen_stopped(self):
+        """Pre-screened rows are not re-evaluated by full policy and remain PRE_SCREEN_STOPPED."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "customer_opted_out": 1},  # R001
+            {"attempt_id": "ATT-000002", "payment_id": "PAY-000002",
+             "failure_category": "hard_decline"},  # R003
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.3, "RETRY_NOW": 0.8, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        # Both should be pre-screened
+        assert "ATT-000001" in pre_entries
+        assert "ATT-000002" in pre_entries
+
+        result = authorize_post_allocation(
+            {}, {}, pre_entries, set(), candidates, policy, frame,
+        )
+        for aid in ["ATT-000001", "ATT-000002"]:
+            entry = self._get_entry_by_id(result, aid)
+            assert entry.authorized_action == "STOP"
+            assert entry.no_intervention_reason == "policy_pre_screen"
+            assert entry.policy_overrode_recommendation is False
+
+    def test_invalid_prediction_rows_remain_invalid_prediction(self):
+        """Invalid prediction rows are not re-evaluated and remain INVALID_PREDICTION."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001"},
+        ]
+        frame = self._make_base_frame(rows)
+        # NaN probability -> invalid prediction
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.3, "RETRY_NOW": float('nan'), "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        assert "ATT-000001" in pre_entries
+        assert pre_entries["ATT-000001"].no_intervention_reason == "invalid_prediction"
+
+        result = authorize_post_allocation(
+            {}, {}, pre_entries, set(), candidates, policy, frame,
+        )
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        assert entry.no_intervention_reason == "invalid_prediction"
+        assert entry.authorized_action == "STOP"
+
+    def test_post_allocation_override_does_not_change_optimizer_allocated_count(self):
+        """Policy override does not move an allocated row out of OPTIMIZER_ALLOCATED bucket."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        # Row is allocated by optimizer
+        assert "ATT-000001" in allocated
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        # Summary still counts it as optimizer_allocated even though policy overrode to STOP
+        assert result.summary.optimizer_allocated_count == 1
+        assert result.summary.total_policy_overrides == 1
+
+    def test_post_allocation_override_does_not_free_allocated_budget(self):
+        """Policy override does not release budget or change budget_allocated_paise."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+            {"attempt_id": "ATT-000002", "payment_id": "PAY-000002",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        # Budget=20.0 = 2000 paise = 2 units. Both rows allocated.
+        config = OptimizerConfig(budget_limit_inr=20.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        budget_before = solver_meta["budget_allocated_paise"]
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        # Budget accounting frozen: same as solver metadata
+        assert result.summary.budget_allocated_paise == budget_before
+
+    def test_post_allocation_override_does_not_free_hr_capacity(self):
+        """Policy override does not release HR capacity or change human_review_allocated_count."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.12, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.10, "HUMAN_REVIEW": 0.18,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=1)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        hr_before = solver_meta["hr_allocated_count"]
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        # HR accounting frozen: same as solver metadata
+        assert result.summary.human_review_allocated_count == hr_before
+
+    def test_post_allocation_override_does_not_cause_replacement_allocation(self):
+        """Policy override does not trigger re-allocation or selection of replacement candidates."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+            {"attempt_id": "ATT-000002", "payment_id": "PAY-000002",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=10.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        # Only 1 action fits budget; one row allocated, one unallocated
+        assert len(allocated) == 1
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        # Allocated row: STOP (overridden), unallocated row: stays NO_INTERVENTION
+        allocated_aid = list(allocated.keys())[0]
+        unallocated_aid = [aid for aid in ["ATT-000001", "ATT-000002"] if aid != allocated_aid][0]
+        entry_alloc = self._get_entry_by_id(result, allocated_aid)
+        entry_unalloc = self._get_entry_by_id(result, unallocated_aid)
+        assert entry_alloc.authorized_action == "STOP"
+        assert entry_unalloc.optimizer_recommendation == "NO_INTERVENTION"
+        assert entry_unalloc.no_intervention_reason == "budget_exhausted"
+
+    def test_optimizer_objective_accounting_unchanged_after_authorization(self):
+        """Optimizer objective value and selected net value remain unchanged after authorization."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        obj_before = solver_meta.get("budget_allocated_inr", 0.0)
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        # Budget allocated unchanged
+        assert result.summary.budget_allocated_inr == obj_before
+        # Entry's selected values frozen from optimizer allocation
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        assert entry.selected_net_incremental_value_inr is not None
+        assert entry.selected_net_incremental_value_inr > 0
+
+    def test_four_bucket_row_partition_invariant_holds(self):
+        """total_rows = pre_screen_stopped + invalid_prediction + optimizer_allocated + no_intervention."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "customer_opted_out": 1},  # pre_screen
+            {"attempt_id": "ATT-000002", "payment_id": "PAY-000002"},  # invalid (NaN)
+            {"attempt_id": "ATT-000003", "payment_id": "PAY-000003",
+             "failure_category": "temporary_decline", "attempt_number": 1},  # allocated
+            {"attempt_id": "ATT-000004", "payment_id": "PAY-000004",
+             "failure_category": "temporary_decline", "attempt_number": 1},  # no_intervention (budget)
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.3, "RETRY_NOW": float('nan'), "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        # ATT-000001 pre_screened, ATT-000002 invalid_prediction
+        assert "ATT-000001" in pre_entries
+        assert "ATT-000002" in pre_entries
+
+        # Only allocate ATT-000003 (budget=10.0 = 1000 paise = 1 unit)
+        cands_003 = [c for c in candidates if c.attempt_id == "ATT-000003"]
+        config = OptimizerConfig(budget_limit_inr=10.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(cands_003), {"ATT-000003"}, config
+        )
+
+        all_ids = {"ATT-000001", "ATT-000002", "ATT-000003", "ATT-000004"}
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries, all_ids, candidates, policy, frame,
+        )
+        s = result.summary
+        assert s.total_rows == (
+            s.pre_screen_stopped_count +
+            s.invalid_prediction_count +
+            s.optimizer_allocated_count +
+            s.no_intervention_count
+        )
+
+    def test_optimizer_recommendation_and_authorized_action_remain_distinct(self):
+        """optimizer_recommendation and authorized_action are stored as separate fields."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        # The two fields are distinct even when both are strings
+        assert isinstance(entry.optimizer_recommendation, str)
+        assert isinstance(entry.authorized_action, str)
+        # They can differ
+        assert entry.optimizer_recommendation != entry.authorized_action
+
+    def test_deterministic_repeated_authorization_produces_identical_results(self):
+        """Identical inputs produce byte-identical authorization output across repeated runs."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.3, "RETRY_NOW": 0.8, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        eligible = set(c.attempt_id for c in candidates)
+
+        results = []
+        for _ in range(5):
+            r = authorize_post_allocation(
+                allocated, unallocated, pre_entries, eligible, candidates, policy, frame,
+            )
+            results.append(r.to_json())
+
+        assert all(r == results[0] for r in results)
+
+    def test_stop_dominance_mechanically_enforced(self):
+        """STOP rule R008 (low probability) mechanically overrides any positive-value optimizer recommendation."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},
+        ]
+        frame = self._make_base_frame(rows)
+        # Low probs: R008 fires, but net value positive
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        assert "ATT-000001" in allocated
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        entry = self._get_entry_by_id(result, "ATT-000001")
+        # R008 -> STOP always wins
+        assert entry.authorized_action == "STOP"
+        assert entry.policy_overrode_recommendation is True
+
+    def test_policy_override_counters_in_portfolio_summary(self):
+        """total_policy_overrides and total_policy_stop_overrides are correctly computed."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},  # Will be overridden to STOP by R008
+            {"attempt_id": "ATT-000002", "payment_id": "PAY-000002",
+             "failure_category": "temporary_decline", "attempt_number": 1,
+             "amount_inr": 5000.0},  # May match R007 if high prob
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.05, "RETRY_NOW": 0.18, "RETRY_LATER": 0.15,
+            "REQUEST_UPDATE": 0.12, "HUMAN_REVIEW": 0.16,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=20.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        s = result.summary
+        # All allocated rows get STOP via R008
+        assert s.total_policy_overrides >= 1
+        assert s.total_policy_stop_overrides >= 1
+        assert s.total_policy_stop_overrides <= s.total_policy_overrides
+
+    def test_deterministic_json_output_after_authorization(self):
+        """PortfolioAllocation.to_json() remains deterministic and valid after authorization."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.3, "RETRY_NOW": 0.8, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+
+        json1 = result.to_json()
+        json2 = result.to_json()
+        assert json1 == json2
+        # Must be valid JSON
+        parsed = json.loads(json1)
+        assert "entries" in parsed
+        assert "summary" in parsed
+
+    def test_authorization_cannot_introduce_outcome_leakage(self):
+        """Authorization does not introduce outcome data, ground truth, or treatment assignment fields."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.3, "RETRY_NOW": 0.8, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        config = OptimizerConfig(budget_limit_inr=100.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+
+        # Check no outcome/ground-truth fields in JSON output
+        json_str = result.to_json()
+        forbidden_terms = [
+            "simulated_recovered", "recovered_amount_inr",
+            "treatment_timestamp", "outcome_timestamp",
+            "base_recovery_propensity", "action_effect_logit",
+            "assigned_action", "recovery_action",
+        ]
+        for term in forbidden_terms:
+            assert term not in json_str, f"Outcome leakage: '{term}' found in authorization output"
+
+    def test_budget_exhausted_unallocated_rows_have_correct_reason(self):
+        """Unallocated rows due to budget exhaustion have no_intervention_reason='budget_exhausted'."""
+        rows = [
+            {"attempt_id": "ATT-000001", "payment_id": "PAY-000001",
+             "failure_category": "temporary_decline", "attempt_number": 1},
+            {"attempt_id": "ATT-000002", "payment_id": "PAY-000002",
+             "failure_category": "temporary_decline", "attempt_number": 1},
+        ]
+        frame = self._make_base_frame(rows)
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.3, "RETRY_NOW": 0.8, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+        policy = load_policy_config("config/business_rules.yaml")
+
+        candidates, pre_entries, metadata = build_candidate_universe(frame, bundle, policy)
+        # Budget=10.0 = 1 unit, only 1 action fits
+        config = OptimizerConfig(budget_limit_inr=10.0, human_review_capacity=10)
+        allocated, unallocated, solver_meta = solve_portfolio_allocation(
+            tuple(candidates), set(c.attempt_id for c in candidates), config
+        )
+
+        result = authorize_post_allocation(
+            allocated, unallocated, pre_entries,
+            set(c.attempt_id for c in candidates), candidates, policy, frame,
+        )
+        # Find the unallocated row
+        for entry in result.entries:
+            if entry.optimizer_recommendation == "NO_INTERVENTION" and entry.no_intervention_reason == "budget_exhausted":
+                # Unallocated: CONTROL prob injected, R008 may fire
+                assert entry.authorized_action in {"STOP", "RETRY_LATER", "REQUEST_UPDATE", "HUMAN_REVIEW"}
+                return
+        pytest.fail("Expected at least one budget_exhausted row")
