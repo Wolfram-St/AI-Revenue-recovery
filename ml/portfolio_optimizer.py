@@ -248,7 +248,7 @@ def build_candidate_universe(
     # Track row indices for candidate ordering
     row_indices = {row["attempt_id"]: idx for idx, row in candidate_frame.iterrows()}
     
-    for idx, row in candidate_frame.iterrows():
+    for pos_idx, (idx, row) in enumerate(candidate_frame.iterrows()):
         attempt_id = row["attempt_id"]
         payment_id = row["payment_id"]
         row_index = idx
@@ -277,8 +277,8 @@ def build_candidate_universe(
             )
             continue
         
-        # Get probabilities for this row
-        row_probs = {arm: probs_df.iloc[idx][arm] for arm in ARM_ORDER}
+        # Get probabilities for this row (use positional index for probs_df)
+        row_probs = {arm: probs_df.iloc[pos_idx][arm] for arm in ARM_ORDER}
         
         # Check for invalid predictions (NaN, Inf, out of bounds)
         invalid_prediction = False

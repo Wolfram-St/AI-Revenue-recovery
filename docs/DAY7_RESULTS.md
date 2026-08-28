@@ -1,8 +1,8 @@
 # Day 7 Results — Bounded Recovery Portfolio Optimizer
 
 All numbers below are fresh outputs from one canonical run captured verbatim:
-Branch `feature/day7-optimizer`, latest commit `ecb0f3d` (Task 7 correction),
-extended with Task 8 integration gates at commit TBD.
+Branch `feature/day7-optimizer`, latest commit `d8ecc01` (Task 8 gates),
+extended with corrections for benchmark, G5A hardening, and key mismatch fix.
 
 ## Run configuration
 
@@ -180,20 +180,22 @@ Pre-screened rows bypass optimizer allocation entirely.
 - State count: 558 × 51 × 51 = 1,451,358
 - Action-transition evaluations: 558 × 4 × 51 × 51 = 5,805,432
 
-### Measured canonical benchmark (N=5, U=5, H=50, K=4)
+### Measured canonical benchmark (N=558, U=50, H=50, K=4)
 
 | Metric | Measured Value |
 |--------|---------------|
-| N | 5 |
-| U | 5 |
+| N | 558 |
+| U | 50 |
 | H | 50 |
 | K | 4 |
-| State count | 1,530 |
-| Transition count | 6,120 |
-| Elapsed time | 0.067 seconds |
-| Peak memory | 0.035 MB |
+| State count | 1,451,358 |
+| Transition count | 5,805,432 |
+| Elapsed time | 111.92 seconds |
+| Peak memory | 13.57 MB |
 | Solver type | `exact_dp_2d` |
 | Exactness | `EXACT_DP_OPTIMAL` |
+| Candidates | 2,232 (4 arms × 558 rows, positive net value) |
+| Unique rows | 558 |
 
 ### Proposed hard guard limits (NOT validated production limits)
 
@@ -203,16 +205,16 @@ Pre-screened rows bypass optimizer allocation entirely.
 | U_max | 500 units (500,000 paise) | Proposed |
 | H_max | 200 HR slots | Proposed |
 
-**Distinction:** The measured canonical benchmark demonstrates solver correctness on small problems. The proposed guard limits are architectural bounds that raise `PortfolioProblemTooLargeError` when exceeded. They have NOT been validated for runtime/memory on production-scale problems.
+**Distinction:** The measured canonical benchmark demonstrates solver correctness on the actual N=558 test split. The proposed guard limits are architectural bounds that raise `PortfolioProblemTooLargeError` when exceeded. They have NOT been validated for runtime/memory beyond the canonical configuration.
 
 ## Final test counts
 
 | Suite | Count |
 |-------|-------|
-| Focused Task 8 (TestExactDPSolver + TestTask8IntegrationGates) | 30 |
-| Relevant Day 7 (all 4 Day 7 test files) | 180 |
-| Full local | 955 |
-| Full Docker | 955 |
+| Focused Task 8 (TestExactDPSolver + TestTask8IntegrationGates) | 31 |
+| Relevant Day 7 (all 4 Day 7 test files) | 181 |
+| Full local | 956 |
+| Full Docker | 956 |
 
 ## All commits associated with Day 7 Tasks 1–8
 
@@ -229,15 +231,11 @@ c6f48c2 feat(day7): add fair deterministic greedy portfolio baseline
 
 ## Known limitations and deferred work
 
-1. **Canonical runtime/memory benchmark:** The preflight benchmark is verified on small N=5 problems. A full N=558 benchmark on the held-out test split was not executed during Task 8. This is a documentation gap, not a correctness gap.
+1. **Greedy baseline policy authorization:** The greedy baseline (`optimize_portfolio_greedy`) does not apply post-allocation policy authorization. It sets `authorized_action=cand.arm` directly. This means the greedy baseline does not benefit from (or suffer from) STOP dominance. For fair comparison, both solvers should ideally go through the same authorization pipeline. This is an architectural decision, not a bug.
 
-2. **Greedy baseline policy authorization:** The greedy baseline (`optimize_portfolio_greedy`) does not apply post-allocation policy authorization. It sets `authorized_action=cand.arm` directly. This means the greedy baseline does not benefit from (or suffer from) STOP dominance. For fair comparison, both solvers should ideally go through the same authorization pipeline. This is an architectural decision, not a bug.
+2. **G5A structural assertion:** The G5A test compares entry counts rather than composition equality. The meaningful non-inferiority check lives in G5C. This is acceptable but could be strengthened.
 
-3. **compare_portfolio_to_baseline key mismatch:** The function reads `optimizer_objective_value_inr` from eval dicts, but `evaluate_portfolio_allocation` returns `model_objective_value_inr`. This means `compare_portfolio_to_baseline` always gets 0.0 for objective delta unless the caller manually injects the key. This is a pre-existing bug, not introduced by Task 8.
-
-4. **G5A structural assertion:** The G5A test compares entry counts rather than composition equality. The meaningful non-inferiority check lives in G5C. This is acceptable but could be strengthened.
-
-5. **No AGENTS.md:** The repository does not contain an AGENTS.md file.
+3. **No AGENTS.md:** The repository does not contain an AGENTS.md file.
 
 ## Explicit final Day 7 verdict
 

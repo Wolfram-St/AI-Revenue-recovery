@@ -296,8 +296,8 @@ def compare_portfolio_to_baseline(
     Returns:
         Comparison dictionary with deltas and labels.
     """
-    opt_obj = optimizer_eval.get("optimizer_objective_value_inr", 0.0)
-    gr_obj = greedy_eval.get("optimizer_objective_value_inr", 0.0)
+    opt_obj = optimizer_eval.get("model_objective_value_inr", 0.0)
+    gr_obj = greedy_eval.get("model_objective_value_inr", 0.0)
 
     opt_recovered_amount = optimizer_eval.get("total_recovered_amount_inr", 0.0)
     gr_recovered_amount = greedy_eval.get("total_recovered_amount_inr", 0.0)
@@ -321,6 +321,6 @@ def compare_portfolio_to_baseline(
         "recovered_amount_delta_inr": recovered_amount_delta,
         "recovery_count_delta": recovery_count_delta,
         "advantage_label": advantage_label,
-        "optimizer_objective_value_inr": opt_obj,
-        "greedy_objective_value_inr": gr_obj,
+        "optimizer_model_objective_value_inr": opt_obj,
+        "greedy_model_objective_value_inr": gr_obj,
     }

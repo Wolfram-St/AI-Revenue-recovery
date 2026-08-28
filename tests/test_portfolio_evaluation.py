@@ -593,14 +593,14 @@ class TestComparisonDelta:
             "total_evaluated": 2,
             "total_recovered": 1,
             "total_recovered_amount_inr": 1000.0,
-            "optimizer_objective_value_inr": 200.0,
+            "model_objective_value_inr": 200.0,
             "intervention_count": 2,
         }
         greedy_eval = {
             "total_evaluated": 2,
             "total_recovered": 0,
             "total_recovered_amount_inr": 0.0,
-            "optimizer_objective_value_inr": 150.0,
+            "model_objective_value_inr": 150.0,
             "intervention_count": 2,
         }
 
@@ -612,8 +612,8 @@ class TestComparisonDelta:
 
     def test_equal_objectives_produce_zero_delta(self):
         """When both have equal objective, delta is zero."""
-        eval_a = {"optimizer_objective_value_inr": 100.0, "total_recovered_amount_inr": 500.0}
-        eval_b = {"optimizer_objective_value_inr": 100.0, "total_recovered_amount_inr": 500.0}
+        eval_a = {"model_objective_value_inr": 100.0, "total_recovered_amount_inr": 500.0}
+        eval_b = {"model_objective_value_inr": 100.0, "total_recovered_amount_inr": 500.0}
 
         result = compare_portfolio_to_baseline(eval_a, eval_b)
 
@@ -622,8 +622,8 @@ class TestComparisonDelta:
 
     def test_greedy_superior_produces_negative_delta(self):
         """When greedy is better, delta is negative."""
-        optimizer_eval = {"optimizer_objective_value_inr": 50.0}
-        greedy_eval = {"optimizer_objective_value_inr": 200.0}
+        optimizer_eval = {"model_objective_value_inr": 50.0}
+        greedy_eval = {"model_objective_value_inr": 200.0}
 
         result = compare_portfolio_to_baseline(optimizer_eval, greedy_eval)
 
