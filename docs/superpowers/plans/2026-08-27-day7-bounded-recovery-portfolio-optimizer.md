@@ -1,11 +1,11 @@
 # Implementation Plan — Day 7: Exact Bounded Recovery Portfolio Optimizer & Hardened Evaluation Gates
 
-**Date:** 2026-08-27 (Revised 2026-08-28 — Plan Hardening Loop)  
-**Status:** Approved Hardened Implementation Plan (Exact Solver Specification)  
-**Target Branch:** `feature/day7-optimizer`  
-**Base Commit:** `06e6b4d`  
-**Design Spec Commit:** `c85df66` (`docs/superpowers/specs/2026-08-27-day7-bounded-recovery-portfolio-optimizer-design.md`)  
-**Previous Plan Commit:** `dd7f59b`  
+**Date:** 2026-08-27 (Revised 2026-08-28 — Plan Hardening Loop Round 2)
+**Status:** Approved Hardened Implementation Plan (Exact Integer-Paise Solver & Performance Gate Specification)
+**Target Branch:** `feature/day7-optimizer`
+**Base Commit:** `06e6b4d`
+**Design Spec Commit:** `c85df66` (`docs/superpowers/specs/2026-08-27-day7-bounded-recovery-portfolio-optimizer-design.md`)
+**Previous Plan Commit:** `701eac2`
 
 ---
 
@@ -15,15 +15,29 @@ This implementation plan defines the test-driven, 8-task implementation for Day 
 
 ### Key Hardening & Solver Decisions
 
-1. **Exact 2D Dynamic Programming Solver (Option A):** The production Day 7 optimizer implements an exact 2D DP algorithm over rows with state dimensions `(budget_units, human_review_capacity)`. It guarantees exact objective maximization without heuristic approximation or greedy fallback.
-2. **Integer Paise & Cost Unit Discretization:** Monetary values are converted to integer paise (`int(round(amount_inr * 100))`) or integer cost units (`int(round(amount_inr / cost_unit_inr))`) to eliminate binary floating-point indexing errors.
-3. **Explicit Computational Limits & Fail-Closed Contract:** Supported limits ($N \le 1000$ rows, $B \le 200,000$ paise / $U \le 200$ units, $H \le 200$ HR slots) are explicitly guarded. Exceeding limits raises `PortfolioProblemTooLargeError` fail-closed. No silent greedy fallback exists.
-4. **Redesigned G5 Gates (G5A, G5B, G5C, G5D):** Replaces vague comparison with four explicit sub-gates:
+1. **Exact 2D Dynamic Programming Solver (Option A):** The production Day 7 optimizer implements an exact 2D DP algorithm over rows with state dimensions `(budget_paise, human_review_capacity)`. It guarantees exact objective maximization without heuristic approximation or greedy fallback.
+2. **Single Canonical Money Unit (Integer Paise):**
+   - **Integer Paise** (`int`) is the single canonical internal representation for solver budget accounting, action costs, and feasibility checks.
+   - Public/external interfaces accept monetary inputs in INR floats. Before entering DP state logic, monetary values MUST be validated and converted deterministically to integer paise: $\text{paise} = \text{int}(\text{round}(\text{inr\_val} \times 100))$.
+   - Input validation rule: Monetary inputs must be representable to exactly 2 decimal places ($|\text{inr\_val} \times 100 - \text{round}(\text{inr\_val} \times 100)| < 10^{-4}$); malformed fractional paise raise `PortfolioOptimizationError`.
+   - Binary floating-point values MUST NEVER be used as DP state indices or budget feasibility checks.
+   - Budget feasibility checks are exact integer comparisons over paise (`paise_spent <= budget_limit_paise`). No floating-point epsilon is used for money or budget accounting.
+3. **Precise DP Complexity & State vs Transition Distinction:**
+   - **State-Space Complexity:** $\mathcal{O}(N \times U_{\text{paise}} \times H_{\text{max}})$ states.
+   - **Practical Action-Transition Work:** $\mathcal{O}(N \times K \times U_{\text{paise}} \times H_{\text{max}})$ action evaluations, where $K = 4$ candidate arms.
+   - **Canonical Dimensions ($N = 558, U = 50\text{ cost units} = 50,000\text{ paise}, H = 50, K = 4$):**
+     - State count (under 10 INR unit discretization): $558 \times 51 \times 51 = 1,451,358$ states.
+     - Action-transition evaluations: $558 \times 4 \times 51 \times 51 = 5,805,432$ evaluations.
+4. **Proposed Guard Limits & Preflight Memory/Performance Gate:**
+   - Proposed hard guard limits: $N_{\text{max}} = 1000$ rows, $U_{\text{max}} = 50,000\text{ paise}$ (500 INR budget at 10 INR step / 50 units), $H_{\text{max}} = 200$ HR slots.
+   - Exceeding guard limits raises `PortfolioProblemTooLargeError` fail-closed. No silent greedy fallback exists.
+   - Specific runtime claims (e.g. "15-30 ms") are removed; performance and memory usage are implementation-verification concerns. Task 4 and Task 8 mandate an explicit solver preflight benchmark in Docker recording dimensions, state count, transition count, elapsed time, peak memory, solver type, and exactness status.
+5. **Redesigned G5 Gates (G5A, G5B, G5C, G5D):** Replaces vague comparison with four explicit sub-gates:
    - **G5A (Fair Comparison Integrity):** Programmatic verification of identical candidate universe digest, constraints, action costs, net values, and eligibility rules between optimizer and greedy baseline.
    - **G5B (Exact Solver Correctness):** Verification against independently known mathematical optima and test-only brute-force recursive enumeration on small fixtures.
-   - **G5C (Baseline Comparison):** Verification that `portfolio_objective_delta_inr >= 0.0` (optimizer never performs worse than greedy).
+   - **G5C (Baseline Comparison):** Verification that `portfolio_objective_delta_inr >= 0.0` (exact DP optimizer never performs worse than greedy).
    - **G5D (Canonical Advantage Reporting):** Deterministic result labeling (`PORTFOLIO_ADVANTAGE_OBSERVED` vs `NO_PORTFOLIO_ADVANTAGE_OBSERVED`) for scientific honesty on canonical runs.
-5. **Preserved Invariants & Boundaries:** Real monetary budget (`budget_limit_inr`), HR capacity (`human_review_capacity`), gross/cost/net value separation, 4-bucket row partition (`PRE_SCREEN_STOPPED`, `INVALID_PREDICTION`, `OPTIMIZER_ALLOCATED`, `NO_INTERVENTION`), Stage 1 pre-screening vs Stage 2 authorization, non-retroactive budget accounting, held-out test split isolation, and deterministic JSON serialization (`sort_keys=True`, `allow_nan=False`).
+6. **Preserved Invariants & Boundaries:** Real monetary budget (`budget_limit_inr`), HR capacity (`human_review_capacity`), gross/cost/net value separation, 4-bucket row partition (`PRE_SCREEN_STOPPED`, `INVALID_PREDICTION`, `OPTIMIZER_ALLOCATED`, `NO_INTERVENTION`), Stage 1 pre-screening vs Stage 2 authorization, non-retroactive budget accounting, held-out test split isolation, and deterministic JSON serialization (`sort_keys=True`, `allow_nan=False`).
 
 ### Preserved Core Pipeline Architecture
 
@@ -37,7 +51,7 @@ Incremental value estimates (Gross & Net incremental INR relative to CONTROL)
 Leakage-safe candidate builder (Decision-time whitelist + forbidden column filter + Pre-Screening)
    │
    ▼
-Exact Portfolio Optimizer (Exact 2D DP solver over candidate rows with integer budget & HR capacity)
+Exact Portfolio Optimizer (Exact 2D DP solver over candidate rows with integer paise budget & HR capacity)
    │
    ▼
 Optimizer recommendation (optimizer_recommendation per row)
@@ -59,7 +73,7 @@ Synthetic outcome evaluation (Offline join to Day 4 simulated ground truth post-
 - **I-3: Optimizer recommendation and authorized_action must never be collapsed.** They are distinct semantic fields in every audit record.
 - **I-4: Realized outcomes must never enter candidate construction or allocation.** Forbidden features and post-decision outcome fields are blocked before optimization.
 - **I-5: Allocation must be fully fixed before synthetic outcomes are joined.** Synthetic outcomes enter ONLY during offline evaluation post-allocation.
-- **I-6: Budget consumed by an optimizer allocation is NOT retroactively freed when policy overrides the recommendation.** Accounting tracks `budget_allocated_inr` and `post_policy_net_authorized_count` separately.
+- **I-6: Budget consumed by an optimizer allocation is NOT retroactively freed when policy overrides the recommendation.** Accounting tracks `budget_allocated_inr` (and `budget_allocated_paise`) and `post_policy_net_authorized_count` separately.
 - **I-7: All allocation must be deterministic and reproducible.** Identical inputs and configuration produce byte-identical JSON traces across environments.
 
 ---
@@ -71,31 +85,40 @@ For each eligible row $i \in \{1, \dots, N\}$ and treated arm $a \in \text{TREAT
 $$x(i, a) \in \{0, 1\}$$
 where $x(i, a) = 1$ indicates that action $a$ is recommended for row $i$, and $x(i, a) = 0$ otherwise.
 
-### 2.2 Value & Cost Accounting Formulas
+### 2.2 Value & Cost Accounting Formulas (Integer Paise Canonical Contract)
 For row $i$ with payment amount $\text{amount\_inr}(i)$ and failure category $\text{failure\_category}(i)$:
 
-1. **Risk Penalty:**
+1. **Monetary Input Conversion & Validation:**
+   Public interfaces receive $\text{amount\_inr}(i)$ and $\text{budget\_limit\_inr}$ as floats.
+   - Validation check: $|\text{val} \times 100 - \text{round}(\text{val} \times 100)| < 10^{-4}$. Non-2-decimal floats raise `PortfolioOptimizationError`.
+   - Integer paise conversion:
+     $$\text{amount\_paise}(i) = \text{int}(\text{round}(\text{amount\_inr}(i) \times 100))$$
+     $$\text{budget\_limit\_paise} = \text{int}(\text{round}(\text{budget\_limit\_inr} \times 100))$$
+
+2. **Risk Penalty:**
    $$\text{risk\_penalty\_inr}(i) = \begin{cases} \text{UNKNOWN\_CATEGORY\_RISK\_FRACTION} \times \text{amount\_inr}(i) & \text{if } \text{failure\_category}(i) = \text{"unknown"} \\ 0.0 & \text{otherwise} \end{cases}$$
    *(where $\text{UNKNOWN\_CATEGORY\_RISK\_FRACTION} = 0.05$, imported from `recovery.scoring`)*
 
-2. **Action Cost:**
-   $$\text{action\_cost\_inr}(i, a) = \text{RETRY\_INTERVENTION\_COST\_INR} = 10.0 \text{ INR}$$
-   *(Source: `RETRY_INTERVENTION_COST_INR` imported from `recovery.scoring`. Constant per treated arm per Day 6 evidence)*
+3. **Action Cost (Integer Paise Canonical Form):**
+   $$\text{action\_cost\_inr}(i, a) = \text{RETRY\_INTERVENTION\_COST\_INR} = 10.00\text{ INR}$$
+   $$\text{action\_cost\_paise}(i, a) = \text{int}(\text{round}(\text{action\_cost\_inr}(i, a) \times 100)) = 1000\text{ paise}$$
+   *(Source: `RETRY_INTERVENTION_COST_INR` imported from `recovery.scoring`)*
 
-3. **Gross Incremental Value:**
+4. **Gross Incremental Value (INR float):**
    $$\text{gross\_incremental\_value\_inr}(i, a) = (\hat{P}_a(i) - \hat{P}_{\text{CONTROL}}(i)) \times \text{amount\_inr}(i) - \text{risk\_penalty\_inr}(i)$$
 
-4. **Net Incremental Value:**
+5. **Net Incremental Value (INR float):**
    $$\text{net\_incremental\_value\_inr}(i, a) = \text{gross\_incremental\_value\_inr}(i, a) - \text{action\_cost\_inr}(i, a)$$
 
 ### 2.3 Exact Mathematical Objective
 $$\text{maximize } \sum_{i=1}^{N} \sum_{a \in \text{TREATED\_ARMS}} x(i, a) \times \text{net\_incremental\_value\_inr}(i, a)$$
 
-### 2.4 Constraints
+### 2.4 Constraints (Integer-Exact Arithmetic)
 1. **At-most-one action per row:**
    $$\sum_{a \in \text{TREATED\_ARMS}} x(i, a) \le 1 \quad \forall i \in \{1, \dots, N\}$$
-2. **Real Monetary Budget Limit (INR):**
-   $$\sum_{i=1}^{N} \sum_{a \in \text{TREATED\_ARMS}} x(i, a) \times \text{action\_cost\_inr}(i, a) \le \text{budget\_limit\_inr}$$
+2. **Real Monetary Budget Limit (Integer Paise Exact):**
+   $$\sum_{i=1}^{N} \sum_{a \in \text{TREATED\_ARMS}} x(i, a) \times \text{action\_cost\_paise}(i, a) \le \text{budget\_limit\_paise}$$
+   *(Exact integer arithmetic over paise; NO float epsilon used for budget feasibility)*
 3. **HUMAN_REVIEW Capacity Limit:**
    $$\sum_{i=1}^{N} x(i, \text{HUMAN\_REVIEW}) \le \text{human\_review\_capacity}$$
 4. **Positive Net Value Gate:**
@@ -109,43 +132,45 @@ $$\text{maximize } \sum_{i=1}^{N} \sum_{a \in \text{TREATED\_ARMS}} x(i, a) \tim
 
 To solve the 2-constraint 0-1 knapsack allocation problem with mutually exclusive row choices **exactly** and **deterministically**, Day 7 uses a 2D Dynamic Programming solver over candidate rows.
 
-#### Integer Discretization
-- **Monetary Unit Discretization:** Monetary action costs and budget limits are discretized into integer units to prevent floating-point indexing errors.
-  - Base step size: $\Delta c = \text{min\_cost\_unit\_inr} = 10.0\text{ INR}$ (or $1\text{ paise} = 0.01\text{ INR}$ for general fractional costs).
-  - Integer budget capacity: $U_{\text{max}} = \text{int}(\text{round}(\text{budget\_limit\_inr} / \Delta c))$.
-  - Integer action cost for arm $a$: $c(i, a) = \text{int}(\text{round}(\text{action\_cost\_inr}(i, a) / \Delta c))$. (For $10.0\text{ INR}$ costs with $10.0\text{ INR}$ step, $c(i, a) = 1$).
-- **HR Capacity Dimension:** Integer capacity $H_{\text{max}} = \text{human\_review\_capacity}$.
+#### Integer Paise State Indexing
+- **Monetary Step Discretization:** Since all action costs in the Day 6/7 model are uniform multiples of 10.00 INR (1000 paise), budget state indices can be indexed in integer cost units $u = \text{paise} // 1000$. (In the general case of non-uniform costs, integer paise indices $p \in \{0, \dots, \text{budget\_limit\_paise}\}$ are used).
+- Floating-point values MUST NEVER be used as DP state indices or array dimensions.
+- Integer budget capacity: $U_{\text{max}} = \text{budget\_limit\_paise} // 1000$.
+- HR Capacity Dimension: Integer capacity $H_{\text{max}} = \text{human\_review\_capacity}$.
 
 #### State Definition
 For row index $i \in \{0, 1, \dots, N\}$, budget unit index $u \in \{0, 1, \dots, U_{\text{max}}\}$, and HR capacity index $h \in \{0, 1, \dots, H_{\text{max}}\}$:
-$$\text{DP}[i, u, h] = \text{maximum total net incremental value (INR) achievable using a subset of rows } \{1, \dots, i\}$$
+$$\text{DP}[i, u, h] = \text{maximum total net incremental value (INR float) achievable using a subset of rows } \{1, \dots, i\}$$
 
 #### DP Recurrence Relation
 For row $i$ with candidate set $A_i = \{a \in \text{TREATED\_ARMS} \mid \text{net\_incremental\_value\_inr}(i, a) > 0.0\}$:
-$$\text{DP}[i, u, h] = \max \Bigg( \text{DP}[i-1, u, h], \max_{a \in A_i : c(i,a) \le u, \text{hr}(a) \le h} \left\{ \text{net\_incremental\_value\_inr}(i, a) + \text{DP}[i-1, u - c(i,a), h - \text{hr}(a)] \right\} \Bigg)$$
-where $\text{hr}(a) = 1$ if $a = \text{HUMAN\_REVIEW}$ else $0$.
+$$\text{DP}[i, u, h] = \max \Bigg( \text{DP}[i-1, u, h], \max_{a \in A_i : c_{\text{units}}(i,a) \le u, \text{hr}(a) \le h} \left\{ \text{net\_incremental\_value\_inr}(i, a) + \text{DP}[i-1, u - c_{\text{units}}(i,a), h - \text{hr}(a)] \right\} \Bigg)$$
+where $\text{hr}(a) = 1$ if $a = \text{HUMAN\_REVIEW}$ else $0$, and $c_{\text{units}}(i,a) = \text{action\_cost\_paise}(i,a) // 1000$.
 
 #### Backpointer Matrix & Deterministic Reconstruction
-A backpointer matrix $\text{Backtrack}[i, u, h]$ records the chosen action $a^* \in A_i \cup \{\text{NO\_INTERVENTION}\}$ that achieved $\text{DP}[i, u, h]$.
+A compact backpointer array $\text{Backtrack}[i, u, h]$ records the chosen action $a^* \in A_i \cup \{\text{NO\_INTERVENTION}\}$ that achieved $\text{DP}[i, u, h]$.
 
-**Deterministic Tie-Breaking:** If two action choices yield identical total net value (within float epsilon $10^{-6}$ INR):
-1. Prefer choice with smaller total monetary units consumed $u$.
-2. Prefer choice with smaller total HR capacity consumed $h$.
-3. Prefer choice with earlier `ARM_ORDER` precedence ($\text{RETRY\_NOW} < \text{RETRY\_LATER} < \text{REQUEST\_UPDATE} < \text{HUMAN\_REVIEW}$).
+**Model-Derived Objective Tie Policy:** Float epsilon $\epsilon = 10^{-6}\text{ INR}$ is used ONLY for comparing float model-derived net values during DP updates:
+- If $v_{\text{candidate}} > \text{DP}[u, h] + 10^{-6}$: select candidate action $a$.
+- If $|v_{\text{candidate}} - \text{DP}[u, h]| \le 10^{-6}$: break tie deterministically:
+  1. Prefer choice with smaller total monetary paise spent.
+  2. Prefer choice with smaller total HR capacity spent.
+  3. Prefer choice with earlier `ARM_ORDER` precedence ($\text{RETRY\_NOW} < \text{RETRY\_LATER} < \text{REQUEST\_UPDATE} < \text{HUMAN\_REVIEW}$).
 
-Traceback from state $(N, U_{\text{max}}, H_{\text{max}})$ deterministically reconstructs the exact optimal allocation vector $x^*(i, a)$.
+Traceback from state $(N, U_{\text{max}}, H_{\text{max}})$ deterministically reconstructs the exact optimal allocation vector $x^*(i, a)$. Reporting paise rounding (`round(val, 2)`) applies to presentation/audit trace only and does not alter optimization decision logic.
 
-#### Complexity & Supported Limits
-- **Time Complexity:** $\mathcal{O}(N \times K \times U_{\text{max}} \times H_{\text{max}})$ where $K = 4$ candidate arms per row.
-- **Space Complexity:** $\mathcal{O}(N \times U_{\text{max}} \times H_{\text{max}})$ for backpointers.
-- **Canonical Run Size:** $N = 558$ randomized test rows, $U_{\text{max}} = 50$ (500 INR budget / 10 INR cost), $H_{\text{max}} = 50$ HR slots.
-  - Total DP state cells: $558 \times 51 \times 51 = 1,451,358$ entries.
-  - Pure Python / NumPy execution time: $\approx 15-30$ milliseconds.
-- **Supported Limits & Fail-Closed Contract:**
-  - Maximum supported rows: $N_{\text{max}} = 1000$
-  - Maximum supported budget units: $U_{\text{max}} = 500$ (5,000 INR budget at 10 INR step)
-  - Maximum supported HR slots: $H_{\text{max}} = 200$
-  If $N > N_{\text{max}}$ or $U > U_{\text{max}}$ or $H > H_{\text{max}}$, the solver raises `PortfolioProblemTooLargeError` naming the exceeded limit. **It DOES NOT silently fall back to greedy or produce an approximate solution.**
+#### Precise Complexity & Work Disclosures
+- **State-Space Complexity:** $\mathcal{O}(N \times U_{\text{max}} \times H_{\text{max}})$ states.
+- **Practical Action-Transition Work:** $\mathcal{O}(N \times K \times U_{\text{max}} \times H_{\text{max}})$ action evaluations, where $K = 4$ candidate arms per row.
+- **Canonical Run Work ($N = 558, U = 50\text{ units} = 50,000\text{ paise}, H = 50, K = 4$):**
+  - Total DP state cells: $558 \times 51 \times 51 = 1,451,358$ states.
+  - Action-transition evaluations: $558 \times 4 \times 51 \times 51 = 5,805,432$ evaluations.
+- **Memory Implementation Requirement:** To prevent excessive memory allocation in pure Python, implementation must use a 2-layer rolling DP array for value updates and compact integer array storage (`int8` or `uint8` for arm indices) for backtrack metadata.
+- **Proposed Guard Limits & Fail-Closed Contract:**
+  - Proposed maximum rows: $N_{\text{max}} = 1000$
+  - Proposed maximum budget units: $U_{\text{max}} = 500$ ($50,000\text{ paise} = 500.00\text{ INR}$)
+  - Proposed maximum HR slots: $H_{\text{max}} = 200$
+  *These are proposed hard guard limits pending implementation-time preflight benchmark validation.* If $N > N_{\text{max}}$ or $U > U_{\text{max}}$ or $H > H_{\text{max}}$, the solver raises `PortfolioProblemTooLargeError` naming the exceeded limit. **It DOES NOT silently fall back to greedy or produce an approximate solution.**
 
 ---
 
@@ -171,7 +196,7 @@ $$\text{PRE\_SCREEN\_STOPPED} \cap \text{INVALID\_PREDICTION} \cap \text{OPTIMIZ
 - **Scope:** Evaluated BEFORE optimization as an eligibility gate.
 - **Rules Evaluated:** ONLY context-only terminal STOP rules whose conditions depend exclusively on decision-time context features (`customer_opted_out`, `fraud_risk`, `failure_category`, `attempt_number`, `amount_inr`, `failure_code`, `issuer_response`).
 - **Forbidden in Pre-Screening:** Conditions referencing `recovery_probability`, `optimizer_recommendation`, predicted action probabilities, post-decision outcomes, or treatment assignments MUST NOT be evaluated during pre-screening. (Rules R006, R007, R008 are probability-dependent and are skipped in Stage 1).
-- **Outcome:** Pre-screened rows are placed in `PRE_SCREEN_STOPPED`, receive `optimizer_recommendation = "NO_INTERVENTION"`, `no_intervention_reason = "policy_pre_screen: STOP"`, and `authorized_action = "STOP"`. They consume $0.0$ INR budget and 0 HUMAN_REVIEW capacity, and do NOT enter DP candidate construction.
+- **Outcome:** Pre-screened rows are placed in `PRE_SCREEN_STOPPED`, receive `optimizer_recommendation = "NO_INTERVENTION"`, `no_intervention_reason = "policy_pre_screen: STOP"`, and `authorized_action = "STOP"`. They consume $0\text{ paise}$ budget and 0 HUMAN_REVIEW capacity, and do NOT enter DP candidate construction.
 
 ### 4.2 Stage 2: `POST_ALLOCATION_POLICY` (Final Deterministic Authorization)
 - **Scope:** Evaluated AFTER exact DP allocation for EVERY row in the dataset (allocated and unallocated) via `decide_action(policy_context, policy)`.
@@ -179,7 +204,7 @@ $$\text{PRE\_SCREEN\_STOPPED} \cap \text{INVALID\_PREDICTION} \cap \text{OPTIMIZ
   - Allocated rows (`OPTIMIZER_ALLOCATED`): inject $\hat{P}_{\text{top\_arm}}(i)$ as `recovery_probability`.
   - Unallocated rows (`NO_INTERVENTION`, `PRE_SCREEN_STOPPED`, `INVALID_PREDICTION`): inject $\hat{P}_{\text{CONTROL}}(i)$ as `recovery_probability`.
 - **Authorization Boundary:** Returns `authorized_action` and `authorization_reason`. If policy overrides recommendation (e.g. probability-dependent STOP rule R006 fires), `authorized_action = "STOP"` and `policy_overrode_recommendation = True`.
-- **Non-Retroactive Budget Invariant (I-6):** Monetary budget consumed by the exact DP allocation (`budget_allocated_inr`) and HUMAN_REVIEW capacity consumed (`human_review_allocated_count`) are **NOT retroactively freed** or reassigned when policy overrides an allocation to STOP.
+- **Non-Retroactive Budget Invariant (I-6):** Monetary budget consumed by the exact DP allocation (`budget_allocated_inr`, `budget_allocated_paise`) and HUMAN_REVIEW capacity consumed (`human_review_allocated_count`) are **NOT retroactively freed** or reassigned when policy overrides an allocation to STOP.
 
 ---
 
@@ -190,7 +215,7 @@ $$\text{PRE\_SCREEN\_STOPPED} \cap \text{INVALID\_PREDICTION} \cap \text{OPTIMIZ
 ### Task 1: Freeze portfolio interfaces and contracts
 
 #### 1. Goal
-Define all dataclasses, frozen structures, domain exceptions (including `PortfolioProblemTooLargeError`), status codes, and constants for Day 7 portfolio optimization, exact DP solver parameters, audit traces, and deterministic JSON serialization without implementing solver logic.
+Define all dataclasses, frozen structures, domain exceptions (including `PortfolioProblemTooLargeError`), status codes, and constants for Day 7 portfolio optimization, integer paise budget contracts, exact DP solver parameters, audit traces, and deterministic JSON serialization without implementing solver logic.
 
 #### 2. Files to create or modify
 - `ml/portfolio_optimizer.py` (new module)
@@ -239,6 +264,7 @@ class PortfolioEntry:
     net_incremental_value_by_arm: dict[str, float]
     selected_gross_incremental_value_inr: float | None
     selected_action_cost_inr: float | None
+    selected_action_cost_paise: int | None
     selected_net_incremental_value_inr: float | None
     optimizer_sort_rank: int | None
     authorized_action: str
@@ -255,8 +281,11 @@ class PortfolioSummary:
     no_intervention_count: int
     eligible_candidate_count: int
     budget_limit_inr: float | None
+    budget_limit_paise: int | None
     budget_allocated_inr: float
+    budget_allocated_paise: int
     budget_remaining_inr: float | None
+    budget_remaining_paise: int | None
     human_review_capacity_limit: int | None
     human_review_allocated_count: int
     post_policy_net_authorized_count: int
@@ -317,19 +346,19 @@ docker compose run --rm app pytest tests/test_portfolio_optimizer.py tests/test_
 #### 13. Per-task implementation review checklist
 - [ ] All dataclasses marked `frozen=True`
 - [ ] `PortfolioProblemTooLargeError` defined inheriting from `PortfolioOptimizationError`
-- [ ] `budget_limit_inr` and `budget_allocated_inr` present in `PortfolioSummary`
+- [ ] `budget_limit_paise` and `budget_allocated_paise` present in `PortfolioSummary`
 - [ ] `OPTIMIZER_FORBIDDEN_COLUMNS` strictly defined
 - [ ] JSON serialization method uses `sort_keys=True`, `separators=(",", ":")`, `allow_nan=False`
 
 #### 14. Exit criteria
-Dataclasses import cleanly, enforce immutability, support monetary budget fields, and pass all contract structure unit tests.
+Dataclasses import cleanly, enforce immutability, support monetary budget fields in integer paise, and pass all contract structure unit tests.
 
 ---
 
 ### Task 2: Build leakage-safe candidate construction
 
 #### 1. Goal
-Implement decision-time feature frame validation, forbidden column checking, invalid prediction handling, per-arm probability inference, gross/net incremental revenue calculation, and pre-allocation policy pre-screening (`PRE_ALLOCATION_POLICY`).
+Implement decision-time feature frame validation, forbidden column checking, invalid prediction handling, per-arm probability inference, gross/net incremental revenue calculation, integer paise conversion validation, and pre-allocation policy pre-screening (`PRE_ALLOCATION_POLICY`).
 
 #### 2. Files to create or modify
 - `ml/portfolio_optimizer.py`
@@ -352,6 +381,7 @@ class CandidatePair:
     arm: str
     gross_incremental_value_inr: float
     action_cost_inr: float
+    action_cost_paise: int
     net_incremental_value_inr: float
     p_hat_arm: float
     p_hat_control: float
@@ -364,24 +394,29 @@ def build_candidate_universe(
     """Validate frame, handle invalid predictions, run pre-allocation policy pre-screening, and yield positive net-value candidate pairs."""
 ```
 
-#### 5. Exact data-flow boundaries
+#### 5. Exact data-flow boundaries & Integer Paise Validation Contract
 - **Inputs:** Decision-time context `pd.DataFrame`, `ActionModelBundle`, `PolicyConfig`.
 - **Outputs:** Tuple of eligible positive net-value `CandidatePair` instances, dictionary of pre-screened & invalid `PortfolioEntry` records, and metadata dict.
+- **Monetary Conversion Validation Contract:** Every monetary input (`amount_inr`, `budget_limit_inr`) is checked:
+  $$|\text{val} \times 100 - \text{round}(\text{val} \times 100)| < 10^{-4}$$
+  If validation fails (non-2-decimal malformed float), raise `PortfolioOptimizationError`. Do NOT silently round arbitrary malformed precision.
+  Valid floats are converted to integer paise: $\text{paise} = \text{int}(\text{round}(\text{val} \times 100))$.
 
 #### 6. Pre-Allocation Pre-Screening & Leakage Rules
 - **Leakage Guard:** Reject any frame containing columns in `OPTIMIZER_FORBIDDEN_COLUMNS` with `ValueError`.
 - **Pre-Allocation Policy Pre-Screening:** Evaluates `decide_action` using ONLY context features (no probability injected). Rules R001-R004 (opt-out, fraud, hard decline) fire and place rows into `PRE_SCREEN_STOPPED`. Probability-dependent rules (R006-R008) are NOT evaluated during pre-screening.
-- **Invalid Prediction Handling:** Rows with NaN, $\pm\infty$, or probabilities $< 0.0$ or $> 1.0$ are placed into `INVALID_PREDICTION`, produce 0 candidate pairs, consume $0.0$ INR budget, and increment `invalid_prediction_count`.
+- **Invalid Prediction Handling:** Rows with NaN, $\pm\infty$, or probabilities $< 0.0$ or $> 1.0$ are placed into `INVALID_PREDICTION`, produce 0 candidate pairs, consume $0\text{ paise}$ budget, and increment `invalid_prediction_count`.
 - **Net Value Gate:** Only candidate pairs with `net_incremental_value_inr > 0.0` enter the candidate universe.
 
 #### 7. Detailed TDD test cases
 - `test_forbidden_column_rejection`: input frame with `simulated_recovered` raises `ValueError`.
 - `test_missing_required_context`: missing `amount_inr` or `failure_category` raises `ValueError`.
+- `test_malformed_monetary_float_rejection`: `amount_inr = 10.12345` raises `PortfolioOptimizationError` without silent rounding.
 - `test_invalid_prediction_nan_handling`: NaN probability places row in `INVALID_PREDICTION` bucket, 0 budget consumed, 0 candidate pairs created.
 - `test_invalid_prediction_out_of_bounds_handling`: probability $1.2$ or $-0.1$ places row in `INVALID_PREDICTION` bucket without silent clipping.
 - `test_pre_allocation_context_only_stop_prescreen`: rows matching R001-R004 placed in `PRE_SCREEN_STOPPED` with `authorized_action == "STOP"`.
 - `test_pre_allocation_ignores_probability_rules`: probability-dependent rules (R006-R008) do NOT pre-screen rows when probabilities are un-injected.
-- `test_gross_vs_net_value_calculation`: verify `gross_incremental_value_inr = (P_hat_a - P_hat_CONTROL) * amount - risk_penalty`, `action_cost_inr = 10.0`, `net_incremental_value_inr = gross - cost`.
+- `test_gross_vs_net_value_calculation`: verify `gross_incremental_value_inr = (P_hat_a - P_hat_CONTROL) * amount - risk_penalty`, `action_cost_inr = 10.0`, `action_cost_paise = 1000`, `net_incremental_value_inr = gross - cost`.
 - `test_positive_net_value_gate`: candidates with positive gross value but negative net value (`net_incremental_value_inr <= 0.0`) are excluded from candidate pairs.
 
 #### 8. Exact RED verification command
@@ -390,7 +425,7 @@ python -m pytest tests/test_portfolio_optimizer.py -k test_candidate_constructio
 ```
 
 #### 9. Minimal implementation sequence
-1. Implement `_validate_candidate_frame(frame)`.
+1. Implement `_validate_candidate_frame(frame)` including 2-decimal paise validation.
 2. Implement Stage 1 pre-screening calling `decide_action` on context alone.
 3. Compute per-arm probabilities via `predict_all_actions` and check finite [0, 1] bounds.
 4. Construct `CandidatePair` instances for `arm in TREATED_ARMS` where `net_incremental_value_inr > 0.0`.
@@ -406,17 +441,17 @@ docker compose run --rm app pytest tests/test_portfolio_optimizer.py -k test_can
 ```
 
 #### 12. Commit message
-`feat(day7): build leakage-safe candidate builder with pre-allocation policy screening and invalid prediction guards`
+`feat(day7): build leakage-safe candidate builder with integer paise validation and policy pre-screening`
 
 #### 13. Per-task implementation review checklist
 - [ ] Leakage validation runs before any prediction
+- [ ] Non-2-decimal float amounts raise `PortfolioOptimizationError`
 - [ ] Pre-allocation pre-screening evaluates ONLY context-only STOP rules
 - [ ] Invalid predictions (NaN, $\pm\infty$, out-of-bounds) route to `INVALID_PREDICTION` bucket
-- [ ] `gross_incremental_value_inr`, `action_cost_inr`, and `net_incremental_value_inr` explicitly separated
-- [ ] Candidate gate requires `net_incremental_value_inr > 0.0`
+- [ ] `action_cost_paise` (1000 paise) explicitly stored alongside float INR
 
 #### 14. Exit criteria
-Candidate universe constructed safely; invalid predictions guarded; pre-allocation screening filters context STOPs; net value formula verified.
+Candidate universe constructed safely; malformed floats rejected; pre-allocation screening filters context STOPs; net value formula verified.
 
 ---
 
@@ -488,10 +523,10 @@ Candidate pairs ranked deterministically under all input permutations based on n
 
 ---
 
-### Task 4: Implement exact 2D DP portfolio allocation solver
+### Task 4: Implement exact 2D DP portfolio allocation solver & preflight benchmark gate
 
 #### 1. Goal
-Implement the exact 2D Dynamic Programming portfolio allocation solver enforcing real monetary budget limits (`budget_limit_inr`) and HUMAN_REVIEW capacity bounds, integer cost discretization, deterministic tie-breaking, state backpointers, and explicit fail-closed limits (`PortfolioProblemTooLargeError`).
+Implement the exact 2D Dynamic Programming portfolio allocation solver enforcing real monetary budget limits (`budget_limit_paise`) and HUMAN_REVIEW capacity bounds, integer paise cost discretization, 2-layer rolling DP memory optimization, deterministic tie-breaking, state backpointers, explicit fail-closed guard limits (`PortfolioProblemTooLargeError`), and an explicit solver preflight benchmark requirement.
 
 #### 2. Files to create or modify
 - `ml/portfolio_optimizer.py`
@@ -507,36 +542,45 @@ def solve_portfolio_allocation(
     eligible_attempt_ids: set[str],
     config: OptimizerConfig,
 ) -> tuple[dict[str, CandidatePair], dict[str, str], dict]:
-    """Solve constrained portfolio allocation exactly via 2D Dynamic Programming over candidate rows.
+    """Solve constrained portfolio allocation exactly via 2D Dynamic Programming over candidate rows using integer paise budget indices.
     
     Returns:
       allocated: dict[attempt_id, CandidatePair]
       unallocated_reasons: dict[attempt_id, str]
-      solver_metadata: dict (budget_allocated_inr, budget_remaining_inr, hr_allocated_count, solver_type="exact_dp_2d")
+      solver_metadata: dict (budget_allocated_inr, budget_allocated_paise, budget_remaining_paise, hr_allocated_count, solver_type="exact_dp_2d", preflight_stats)
     """
+
+def run_solver_preflight_benchmark(
+    candidates: tuple[CandidatePair, ...],
+    config: OptimizerConfig,
+) -> dict:
+    """Execute preflight benchmark recording dimensions, DP state count, transition count, elapsed time, peak memory, and exactness status."""
 ```
 
 #### 5. Exact DP Algorithm & Constraint Specification
 - **Oversized Problem Guard:** Check $N \le \text{max\_supported\_rows}$ (1000), $U \le \text{max\_supported\_budget\_units}$ (500), $H \le \text{max\_supported\_hr\_capacity}$ (200). If exceeded, raise `PortfolioProblemTooLargeError`. No silent greedy fallback!
-- **State Table:** Array `dp[u, h]` of float net incremental values, initialized to 0.0.
-- **Backpointer Table:** Matrix `backtrack[i, u, h]` storing selected action $a \in \text{TREATED\_ARMS} \cup \{\text{NO\_INTERVENTION}\}$.
+- **Discretization & Integer Arithmetic:** Budget limit $B_{\text{paise}} = \text{int}(\text{round}(\text{budget\_limit\_inr} \times 100))$. Index units $U = B_{\text{paise}} // 1000$. Integer arithmetic is used for all budget feasibility checks (`cost_paise <= budget_remaining_paise`). NO float epsilon is used for budget feasibility!
+- **State Table & Memory Optimization:**
+  - Value table: 2-row rolling array `dp_prev[u, h]` and `dp_curr[u, h]` of float net incremental values to minimize memory overhead.
+  - Backpointer table: Compact 3D NumPy array `backtrack[i, u, h]` storing selected arm index ($0 \dots 4$).
 - **Row Recurrence:** Iterate candidate rows $i = 1 \dots N$:
   - Options for row $i$: NO_INTERVENTION (value 0.0, cost 0, HR 0) OR any positive candidate arm $a \in A_i$ (net value $v_a$, cost units $c_a$, HR $h_a$).
-  - Update `dp` backwards over $u \in [U, c_a]$, $h \in [H, h_a]$:
-    $$v_{\text{candidate}} = v_a + \text{dp}[u - c_a, h - h_a]$$
-    If $v_{\text{candidate}} > \text{dp}[u, h] + 10^{-6}$: select action $a$.
-    If $|v_{\text{candidate}} - \text{dp}[u, h]| \le 10^{-6}$: break tie deterministically (prefer lower $u$, then lower $h$, then earlier `ARM_ORDER`).
+  - Update `dp_curr` backwards over $u \in [U, c_a]$, $h \in [H, h_a]$:
+    $$v_{\text{candidate}} = v_a + \text{dp\_prev}[u - c_a, h - h_a]$$
+    If $v_{\text{candidate}} > \text{dp\_curr}[u, h] + 10^{-6}$: select action $a$.
+    If $|v_{\text{candidate}} - \text{dp\_curr}[u, h]| \le 10^{-6}$: break tie deterministically (prefer lower $u$, then lower $h$, then earlier `ARM_ORDER`).
 - **Traceback:** Trace from `backtrack[N, U_final, H_final]` to reconstruct exact optimal allocation vector $x^*(i, a)$.
+- **Preflight Benchmark Recording:** Collects dimensions $N, U, H, K$, state count ($N \times (U+1) \times (H+1)$), transition count ($N \times K \times (U+1) \times (H+1)$), elapsed seconds, peak MB memory, solver type `exact_dp_2d`, and exactness status `EXACT_DP_OPTIMAL`.
 
 #### 6. Leakage risks and forbidden fields
 No ground-truth features consumed. Allocation decisions depend strictly on decision-time net incremental values, action costs, and constraint limits.
 
-#### 7. Detailed TDD Test Cases (15 Exact Correctness Tests)
+#### 7. Detailed TDD Test Cases (16 Exact Correctness Tests)
 1. `test_exact_optimum_tiny_enumerable_fixture`: verify exact DP objective equals test-only brute-force recursive enumerator optimum on a 3-row, 2-arm fixture.
 2. `test_greedy_suboptimal_exact_dp_superior_fixture`: crafted fixture where global highest-value greedy picks a high-value HR item that exhausts HR capacity, missing two medium-value HR items with higher combined net sum -> exact DP achieves strictly higher objective than greedy.
 3. `test_monetary_and_hr_constraint_interaction`: fixture testing combined binding monetary budget and HR capacity limits.
 4. `test_at_most_one_action_per_row`: structural guarantee verified; no attempt_id allocated twice.
-5. `test_paise_boundary_monetary_exactness`: monetary budget enforced exactly at integer unit/paise boundaries.
+5. `test_paise_boundary_monetary_exactness`: monetary budget enforced exactly at integer paise boundaries using integer comparisons (no float epsilon).
 6. `test_hr_capacity_exactness`: HR capacity limit enforced exactly.
 7. `test_exact_dp_deterministic_tie_breaking`: identical input frame produces byte-identical DP allocation across 100 repeated runs.
 8. `test_deterministic_portfolio_reconstruction`: traceback produces identical selected candidate pairs regardless of candidate array insertion order.
@@ -547,6 +591,7 @@ No ground-truth features consumed. Allocation decisions depend strictly on decis
 13. `test_no_silent_approximation`: verify DP table evaluates exact values without float rounding drift.
 14. `test_no_silent_greedy_fallback`: verify solver metadata explicitly records `solver_type: "exact_dp_2d"`.
 15. `test_brute_force_enumerator_validation`: test-only recursive brute-force enumerator validates exact DP output across 50 random small candidate frames ($N \le 12$).
+16. `test_preflight_benchmark_recording`: verify `run_solver_preflight_benchmark` records $N, U, H, K$, state count ($1,451,358$), transition count ($5,805,432$), elapsed time, and memory metrics cleanly.
 
 #### 8. Exact RED verification command
 ```powershell
@@ -555,9 +600,10 @@ python -m pytest tests/test_portfolio_optimizer.py -k test_exact_dp -v
 
 #### 9. Minimal implementation sequence
 1. Implement `_test_brute_force_enumerate` helper in `tests/test_portfolio_optimizer.py`.
-2. Implement `solve_portfolio_allocation` using 2D DP array with integer unit budget and HR capacity dimensions in `ml/portfolio_optimizer.py`.
-3. Implement deterministic tie-breaking and backpointer traceback reconstruction.
-4. Add size guard raising `PortfolioProblemTooLargeError`.
+2. Implement `solve_portfolio_allocation` using 2-layer rolling DP array with integer paise/unit budget indices in `ml/portfolio_optimizer.py`.
+3. Implement `run_solver_preflight_benchmark` collecting performance and memory trace data.
+4. Implement deterministic tie-breaking and backpointer traceback reconstruction.
+5. Add size guard raising `PortfolioProblemTooLargeError`.
 
 #### 10. Exact GREEN verification command
 ```powershell
@@ -570,18 +616,19 @@ docker compose run --rm app pytest tests/test_portfolio_optimizer.py -k test_exa
 ```
 
 #### 12. Commit message
-`feat(day7): implement exact 2D dynamic programming portfolio allocation solver with brute-force test verification`
+`feat(day7): implement exact 2D dynamic programming portfolio allocation solver with integer paise budget indices and preflight benchmark`
 
 #### 13. Per-task implementation review checklist
 - [ ] Exact 2D DP algorithm implemented (Option A)
-- [ ] Monetary budget discretized to integer units/paise
+- [ ] Integer paise used for all monetary budget indices and comparisons (no float epsilon for money)
 - [ ] HR capacity dimension enforced exactly
-- [ ] Deterministic tie-breaking and traceback reconstruction implemented
+- [ ] 2-layer rolling DP array used to optimize memory
+- [ ] Preflight benchmark helper records dimensions, state count, transition count, time, and memory
 - [ ] `PortfolioProblemTooLargeError` raised on oversized inputs (no silent fallback)
 - [ ] Test-only brute-force recursive enumerator confirms exact optimum
 
 #### 14. Exit criteria
-Exact DP solver passes all 15 correctness unit tests, outperforms greedy on sub-optimal greedy fixtures, and matches brute-force enumerator on small fixtures.
+Exact DP solver passes all 16 correctness unit tests, outperforms greedy on sub-optimal greedy fixtures, matches brute-force enumerator on small fixtures, and executes preflight benchmark cleanly.
 
 ---
 
@@ -616,7 +663,7 @@ def optimize_portfolio(
 - **I-1:** AI recommends; policy authorizes via `decide_action()`.
 - **I-2:** STOP dominance enforced post-allocation across all rows.
 - **I-3:** `optimizer_recommendation` and `authorized_action` stored in separate fields; never collapsed.
-- **I-6:** Budget consumed by optimizer allocation (`budget_allocated_inr`) and HUMAN_REVIEW capacity (`human_review_allocated_count`) are **NOT retroactively freed** or reassigned when policy overrides a recommendation to STOP. `post_policy_net_authorized_count` tracks net authorized non-STOP interventions.
+- **I-6:** Budget consumed by optimizer allocation (`budget_allocated_inr`, `budget_allocated_paise`) and HUMAN_REVIEW capacity (`human_review_allocated_count`) are **NOT retroactively freed** or reassigned when policy overrides a recommendation to STOP. `post_policy_net_authorized_count` tracks net authorized non-STOP interventions.
 - **4-Bucket Row Partition Assertion:** Code explicitly asserts:
   `total_rows == pre_screen_stopped_count + invalid_prediction_count + optimizer_allocated_count + no_intervention_count` and verifies that all four bucket sets are pairwise disjoint.
 
@@ -629,7 +676,7 @@ No post-decision outcome fields allowed in `candidate_frame` or passed to `decid
 
 #### 7. Detailed TDD test cases
 - `test_policy_override_stop`: crafted context where optimizer recommends `RETRY_NOW` but policy condition fires STOP -> `optimizer_recommendation == "RETRY_NOW"`, `authorized_action == "STOP"`, `policy_overrode_recommendation == True`.
-- `test_budget_accounting_non_retroactive`: verify `budget_allocated_inr` is NOT decremented when policy overrides a recommendation to STOP.
+- `test_budget_accounting_non_retroactive`: verify `budget_allocated_inr` and `budget_allocated_paise` are NOT decremented when policy overrides a recommendation to STOP.
 - `test_summary_row_partition_invariant`: verify 4 buckets are mutually exclusive and collectively exhaustive (`total_rows == pre_screen + invalid + allocated + no_intervention`).
 - `test_portfolio_allocation_json_reproducibility`: two identical pipeline calls yield byte-identical `to_json()` output.
 
@@ -640,8 +687,8 @@ python -m pytest tests/test_portfolio_optimizer.py tests/test_portfolio_audit.py
 
 #### 9. Minimal implementation sequence
 1. Implement post-allocation loop calling `decide_action` per row with injected probability.
-2. Build `PortfolioEntry` per row including gross, cost, and net values.
-3. Compute `PortfolioSummary` metrics (`budget_allocated_inr`, `budget_remaining_inr`, `post_policy_net_authorized_count`, `total_policy_overrides`, `total_policy_stop_overrides`).
+2. Build `PortfolioEntry` per row including gross, cost (INR and paise), and net values.
+3. Compute `PortfolioSummary` metrics (`budget_allocated_inr`, `budget_allocated_paise`, `budget_remaining_inr`, `budget_remaining_paise`, `post_policy_net_authorized_count`, `total_policy_overrides`, `total_policy_stop_overrides`).
 4. Validate 4-bucket row partition assertion.
 5. Assemble and return `PortfolioAllocation`.
 
@@ -661,7 +708,7 @@ docker compose run --rm app pytest tests/test_portfolio_optimizer.py tests/test_
 #### 13. Per-task implementation review checklist
 - [ ] Separate semantic fields preserved (I-3)
 - [ ] STOP dominance verified (I-2)
-- [ ] Non-retroactive monetary budget accounting verified (I-6)
+- [ ] Non-retroactive monetary budget accounting verified in INR and paise (I-6)
 - [ ] 4-bucket row partition invariant explicitly asserted
 - [ ] Byte-identical JSON output verified (`sort_keys=True`, `allow_nan=False`)
 
@@ -673,7 +720,7 @@ Full optimization pipeline runs end-to-end; passes policy safety, audit complete
 ### Task 6: Implement fair greedy baselines
 
 #### 1. Goal
-Implement a row-first greedy baseline allocation module to compare against the exact global portfolio optimizer under identical candidate universes, value inputs, monetary constraints, and policy authorization, proving unconstrained equivalence and constrained optimizer superiority.
+Implement a row-first greedy baseline allocation module to compare against the exact global portfolio optimizer under identical candidate universes, value inputs, monetary constraints (in integer paise), and policy authorization, proving unconstrained equivalence and constrained optimizer superiority.
 
 #### 2. Files to create or modify
 - `ml/portfolio_greedy.py` (new module)
@@ -695,8 +742,8 @@ def optimize_portfolio_greedy(
 
 #### 5. Baseline Fairness Guarantees
 - SAME candidate universe (same pre-screened eligible rows)
-- SAME value & cost inputs (same gross, action cost, and net incremental value formulas)
-- SAME active constraints (`budget_limit_inr`, `human_review_capacity`)
+- SAME value & cost inputs (same gross, action cost in paise, and net incremental value formulas)
+- SAME active constraints (`budget_limit_inr` / `budget_limit_paise`, `human_review_capacity`)
 - SAME evaluation split and candidate context frame
 - SAME post-allocation policy authorization (`decide_action`)
 
@@ -706,7 +753,7 @@ def optimize_portfolio_greedy(
 - **Tie-Broken Identity:** When tie-breaking is controlled (`ARM_ORDER` index ascending), both solvers produce byte-identical selected portfolios.
 
 #### 7. Detailed TDD test cases
-- `test_greedy_baseline_validity`: produces valid `PortfolioAllocation` satisfying all monetary and capacity constraints.
+- `test_greedy_baseline_validity`: produces valid `PortfolioAllocation` satisfying all monetary (paise) and capacity constraints.
 - `test_unconstrained_objective_equivalence`: under unconstrained conditions, exact DP optimizer and greedy produce equal total objective value (`optimizer_objective == greedy_objective`).
 - `test_unconstrained_deterministic_portfolio_identity`: under unconstrained conditions with controlled ties, exact DP optimizer and greedy produce identical selected portfolios.
 - `test_exact_dp_outperforms_greedy_constrained_fixture`: crafted multi-row fixture with competing monetary budget and HUMAN_REVIEW capacity constraints where exact DP global optimizer achieves strictly higher objective value than row-first greedy.
@@ -718,7 +765,7 @@ python -m pytest tests/test_portfolio_greedy.py -v
 
 #### 9. Minimal implementation sequence
 1. Create `ml/portfolio_greedy.py`.
-2. Implement row-first allocation logic: sort rows by best positive net incremental value, allocate top available arm per row subject to monetary budget and capacity bounds.
+2. Implement row-first allocation logic: sort rows by best positive net incremental value, allocate top available arm per row subject to monetary budget (paise) and capacity bounds.
 3. Apply post-allocation policy authorization identically to Task 5.
 
 #### 10. Exact GREEN verification command
@@ -735,7 +782,7 @@ docker compose run --rm app pytest tests/test_portfolio_greedy.py
 `feat(day7): implement fair row-first greedy baseline solver with unconstrained equivalence tests`
 
 #### 13. Per-task implementation review checklist
-- [ ] Baseline uses identical candidate universe, action costs, and constraints
+- [ ] Baseline uses identical candidate universe, action costs (paise), and constraints
 - [ ] Policy authorization applied identically
 - [ ] Unconstrained objective equality verified
 - [ ] Constrained global superiority verified
@@ -826,20 +873,20 @@ Evaluation module correctly joins outcomes post-allocation, enforces test split 
 
 ---
 
-### Task 8: Run Day 7 GO/NO-GO gates and documentation
+### Task 8: Run Day 7 GO/NO-GO gates, solver preflight benchmark, and documentation
 
 #### 1. Goal
-Run canonical Day 7 portfolio optimization and evaluation on the canonical held-out test dataset, evaluate all seven pre-registered GO/NO-GO gates (G1-G7) including the redesigned G5 sub-gates (G5A, G5B, G5C, G5D), update test suite, and document evidence in `docs/DAY7.md` and `docs/DAY7_RESULTS.md`.
+Run canonical Day 7 portfolio optimization and evaluation on the canonical held-out test dataset, execute solver preflight performance/memory benchmark, evaluate all seven pre-registered GO/NO-GO gates (G1-G7) including the redesigned G5 sub-gates (G5A, G5B, G5C, G5D), update test suite, and document evidence in `docs/DAY7.md` and `docs/DAY7_RESULTS.md`.
 
 #### 2. Files to create or modify
 - `docs/DAY7.md` (new documentation)
 - `docs/DAY7_RESULTS.md` (new evidence document)
 
 #### 3. Existing contracts consumed
-- `optimize_portfolio`, `optimize_portfolio_greedy`, `evaluate_portfolio_allocation`, `compare_portfolio_to_baseline`, canonical dataset (seed 42).
+- `optimize_portfolio`, `optimize_portfolio_greedy`, `evaluate_portfolio_allocation`, `compare_portfolio_to_baseline`, `run_solver_preflight_benchmark`, canonical dataset (seed 42).
 
 #### 4. Pre-Registered GO/NO-GO Gates (G1-G7 Specification with G5 Redesign)
-- **G1: Feasibility** — Every allocation satisfies all active constraints: no row allocated more than once; `budget_allocated_inr <= budget_limit_inr`; `human_review_allocated_count <= human_review_capacity`; no non-positive-net arm allocated. (Measurable criterion: 0 constraint violations).
+- **G1: Feasibility** — Every allocation satisfies all active constraints: no row allocated more than once; `budget_allocated_paise <= budget_limit_paise`; `human_review_allocated_count <= human_review_capacity`; no non-positive-net arm allocated. (Measurable criterion: 0 constraint violations).
 - **G2: Determinism** — Two fresh runs on identical canonical inputs produce byte-identical sorted-JSON output via `to_json()`. (Measurable criterion: SHA-256 digest match).
 - **G3: Policy Safety** — Three crafted STOP contexts (opted-out, fraud risk, hard decline) produce `authorized_action == "STOP"` in all cases. (Measurable criterion: 100% STOP authorization).
 - **G4: Leakage Safety** — A hostile candidate frame containing forbidden columns raises `ValueError` before any computation. (Measurable criterion: ValueError raised; 0 outcome leakage).
@@ -851,8 +898,13 @@ Run canonical Day 7 portfolio optimization and evaluation on the canonical held-
 - **G6: Synthetic Realized Evaluation** — Optimizer allocation evaluated against held-out Day 4 synthetic outcomes on the test split without outcome features entering allocation. (Measurable criterion: Sealed evaluation executed on held-out test split, unconfounded/confounded split reported).
 - **G7: Audit Completeness & Partition Invariant** — Every row has a `PortfolioEntry` with all required fields. Partition invariant holds: `total_rows == pre_screen_stopped_count + invalid_prediction_count + optimizer_allocated_count + no_intervention_count`. (Measurable criterion: 100% row trace completeness and partition invariant verified).
 
-#### 5. Exact Data-Flow Boundaries
-Full pipeline execution over canonical dataset seed 42 (held-out test split).
+#### 5. Exact Data-Flow Boundaries & Preflight Benchmark Requirement
+Full pipeline execution over canonical dataset seed 42 (held-out test split). Solver preflight benchmark MUST be executed and recorded in `DAY7_RESULTS.md` documenting:
+- Input dimensions $N=558, U=50, H=50, K=4$
+- State count: $1,451,358$ states
+- Action-transition evaluations: $5,805,432$ evaluations
+- Solver elapsed time & peak memory in Docker
+- Exactness status `EXACT_DP_OPTIMAL`
 
 #### 6. Leakage risks and forbidden fields
 Strict adherence to `OPTIMIZER_FORBIDDEN_COLUMNS` throughout execution.
@@ -867,9 +919,10 @@ python -m pytest -v
 
 #### 9. Minimal implementation sequence
 1. Run canonical benchmark script over `data/treatment_outcomes.csv` (dataset seed 42, policy master seed 20260826, held-out test split).
-2. Generate G1-G7 gate results (including G5A-G5D sub-gates).
-3. Write `docs/DAY7.md` specifying system architecture, exact 2D DP solver semantics, real monetary budget rules, and operational guidelines.
-4. Write `docs/DAY7_RESULTS.md` documenting canonical gate evidence, G5D advantage classification, and metrics.
+2. Run `run_solver_preflight_benchmark` recording performance and memory evidence.
+3. Generate G1-G7 gate results (including G5A-G5D sub-gates).
+4. Write `docs/DAY7.md` specifying system architecture, exact integer paise 2D DP solver semantics, real monetary budget rules, and operational guidelines.
+5. Write `docs/DAY7_RESULTS.md` documenting canonical gate evidence, preflight performance/memory metrics, G5D advantage classification, and evaluation tables.
 
 #### 10. Exact GREEN verification command
 ```powershell
@@ -886,13 +939,14 @@ docker compose run --rm app pytest
 
 #### 13. Per-task implementation review checklist
 - [ ] All 7 GO/NO-GO gates evaluated with empirical evidence
+- [ ] Solver preflight performance and memory benchmark executed and recorded
 - [ ] Redesigned G5 gate evaluates G5A, G5B, G5C, G5D explicitly
 - [ ] Scientific honesty maintained for G5D (zero delta labeled `NO_PORTFOLIO_ADVANTAGE_OBSERVED`)
 - [ ] Full test suite green
 - [ ] Documentation carries explicit MODEL ESTIMATE / OBSERVED SIMULATED OUTCOME labeling
 
 #### 14. Exit criteria
-All 7 gates green; full test suite green; documentation complete.
+All 7 gates green; preflight benchmark documented; full test suite green; documentation complete.
 
 ---
 
