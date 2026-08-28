@@ -100,7 +100,7 @@ def evaluate_portfolio_allocation(
             - recovered (int/bool): binary synthetic recovery outcome
             Optionally:
             - assigned_action (str): the randomized treatment assignment
-              (needed for unconfounded comparison using CONTROL arm rows)
+              (needed for observational comparison using CONTROL arm rows)
 
     Returns:
         Deterministic evaluation dictionary with:
@@ -114,7 +114,7 @@ def evaluate_portfolio_allocation(
         - recovery_rate: total_recovered / total_evaluated (0 if none)
         - policy_overrides_evaluated: count of rows where policy overrode optimizer
         - action_metrics: per-action metrics dict
-        - comparisons: confounded and unconfounded comparison blocks
+        - comparisons: confounded and observational comparison blocks
         - model_objective_value_inr: sum of selected_net_incremental_value_inr
     """
     # Validate inputs (allocation is NOT mutated)
@@ -148,9 +148,6 @@ def evaluate_portfolio_allocation(
 
     for entry in allocation.entries:
         aid = entry.attempt_id
-        if aid not in outcome_by_id:
-            continue
-
         total_evaluated += 1
         outcome = outcome_by_id[aid]
         auth_action = entry.authorized_action
@@ -251,7 +248,7 @@ def evaluate_portfolio_allocation(
         control_recovered_amount = 0.0
 
     unconfounded = {
-        "label": "UNCONFOUNDED: portfolio intervention vs randomized CONTROL arm",
+        "label": "OBSERVATIONAL: optimizer-selected intervention vs randomized CONTROL",
         "intervention_count": intervention_count_cmp,
         "intervention_recovery_rate": round(intervention_recovery_rate, 6),
         "intervention_recovered_amount_inr": round(intervention_recovered_amount, 2),
@@ -262,7 +259,7 @@ def evaluate_portfolio_allocation(
 
     return {
         "total_evaluated": total_evaluated,
-        "evaluated_attempt_ids": sorted(outcome_by_id.keys()),
+        "evaluated_attempt_ids": sorted({e.attempt_id for e in allocation.entries}),
         "intervention_count": intervention_count,
         "stop_count": stop_count,
         "no_intervention_count": no_intervention_count,
@@ -275,7 +272,7 @@ def evaluate_portfolio_allocation(
         "action_metrics": action_metrics,
         "comparisons": {
             "confounded": confounded,
-            "unconfounded": unconfounded,
+            "observational": unconfounded,
         },
     }
 

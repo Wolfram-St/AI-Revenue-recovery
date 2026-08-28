@@ -450,7 +450,7 @@ class TestActionSemantics:
 # =============================================================================
 
 class TestComparisonSemantics:
-    """Tests verifying confounded vs unconfounded comparison labeling."""
+    """Tests verifying confounded vs observational comparison labeling."""
 
     def test_confounded_labeling(self):
         """Confounded comparison block exists with explicit label."""
@@ -473,14 +473,14 @@ class TestComparisonSemantics:
         assert confounded.get("label", "").startswith("CONFOUNDED")
 
     def test_unconfounded_labeling(self):
-        """Unconfounded comparison block exists with explicit label."""
+        """Observational comparison block exists with explicit label."""
         entries = _make_portfolio_entries([
             {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
              "authorized_action": "RETRY_NOW"},
         ])
         alloc = _make_allocation(entries)
 
-        # Outcome frame includes CONTROL arm rows for unconfounded comparison
+        # Outcome frame includes CONTROL arm rows for observational comparison
         outcome_df = _make_outcome_frame([
             {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
             {"attempt_id": "ATT-000002", "amount_inr": 2000.0, "recovered": 0,
@@ -492,8 +492,8 @@ class TestComparisonSemantics:
         result = evaluate_portfolio_allocation(alloc, outcome_df)
 
         comparisons = result.get("comparisons", {})
-        unconfounded = comparisons.get("unconfounded", {})
-        assert unconfounded.get("label", "").startswith("UNCONFOUNDED")
+        unconfounded = comparisons.get("observational", {})
+        assert unconfounded.get("label", "").startswith("OBSERVATIONAL")
 
     def test_confounded_vs_unconfounded_both_present(self):
         """Both comparison blocks exist and carry correct explicit labels."""
@@ -515,9 +515,69 @@ class TestComparisonSemantics:
 
         comparisons = result.get("comparisons", {})
         assert "confounded" in comparisons
-        assert "unconfounded" in comparisons
+        assert "observational" in comparisons
         assert comparisons["confounded"]["label"].startswith("CONFOUNDED")
-        assert comparisons["unconfounded"]["label"].startswith("UNCONFOUNDED")
+        assert comparisons["observational"]["label"].startswith("OBSERVATIONAL")
+
+    def test_no_unconfounded_terminology_in_output(self):
+        """The string 'UNCONFOUNDED' must not appear anywhere in comparison output."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+        ])
+        alloc = _make_allocation(entries)
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+            {"attempt_id": "ATT-000002", "amount_inr": 2000.0, "recovered": 0,
+             "assigned_action": "CONTROL"},
+        ])
+
+        result = evaluate_portfolio_allocation(alloc, outcome_df)
+        serialized = json.dumps(result, sort_keys=True, default=str)
+        assert "UNCONFOUNDED" not in serialized
+        assert "unconfounded" not in serialized
+
+    def test_no_causal_or_unbiased_claims(self):
+        """Comparison output must not claim causal or unbiased treatment effects."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+        ])
+        alloc = _make_allocation(entries)
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+            {"attempt_id": "ATT-000002", "amount_inr": 2000.0, "recovered": 0,
+             "assigned_action": "CONTROL"},
+        ])
+
+        result = evaluate_portfolio_allocation(alloc, outcome_df)
+        serialized = json.dumps(result, sort_keys=True, default=str)
+
+        forbidden_terms = ["unbiased", "causal", "unconfounded"]
+        for term in forbidden_terms:
+            assert term not in serialized.lower(), (
+                f"Comparison output contains forbidden term '{term}': "
+                f"optimizer selection introduces possible bias"
+            )
+
+    def test_obsERVATIONAL_label_requires_control_data(self):
+        """The observational comparison uses CONTROL arm data when available."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+        ])
+        alloc = _make_allocation(entries)
+        # No CONTROL arm rows in outcome frame
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+        ])
+
+        result = evaluate_portfolio_allocation(alloc, outcome_df)
+        comparisons = result.get("comparisons", {})
+        unconfounded = comparisons.get("observational", {})
+        # Should still have the label, but control_count should be 0
+        assert unconfounded.get("label", "").startswith("OBSERVATIONAL")
+        assert unconfounded.get("control_count", 0) == 0
 
 
 # =============================================================================
@@ -593,6 +653,133 @@ class TestErrorHandling:
         with pytest.raises(ValueError):
             evaluate_portfolio_allocation(alloc, outcome_df)
 
+    def test_partial_missing_attempt_ids_fail_closed(self):
+        """When some allocation IDs are missing from outcome frame, evaluation fails."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+            {"attempt_id": "ATT-000002", "optimizer_recommendation": "RETRY_LATER",
+             "authorized_action": "RETRY_LATER"},
+        ])
+        alloc = _make_allocation(entries)
+
+        # Only ATT-000001 is in outcome frame; ATT-000002 is missing
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+        ])
+
+        with pytest.raises(ValueError, match="ATT-000002"):
+            evaluate_portfolio_allocation(alloc, outcome_df)
+
+    def test_multiple_missing_attempt_ids_fail_closed(self):
+        """When multiple allocation IDs are missing, error includes missing IDs."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+            {"attempt_id": "ATT-000002", "optimizer_recommendation": "RETRY_LATER",
+             "authorized_action": "RETRY_LATER"},
+            {"attempt_id": "ATT-000003", "optimizer_recommendation": "REQUEST_UPDATE",
+             "authorized_action": "REQUEST_UPDATE"},
+        ])
+        alloc = _make_allocation(entries)
+
+        # Only ATT-000001 is present; ATT-000002 and ATT-000003 are missing
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+        ])
+
+        with pytest.raises(ValueError):
+            evaluate_portfolio_allocation(alloc, outcome_df)
+
+    def test_allocation_digest_unchanged_after_missing_id_failure(self):
+        """Allocation digest remains unchanged when validation fails due to missing IDs."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+            {"attempt_id": "ATT-000002", "optimizer_recommendation": "RETRY_LATER",
+             "authorized_action": "RETRY_LATER"},
+        ])
+        alloc = _make_allocation(entries)
+        digest_before = _allocation_digest(alloc)
+
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+        ])
+
+        with pytest.raises(ValueError):
+            evaluate_portfolio_allocation(alloc, outcome_df)
+
+        assert _allocation_digest(alloc) == digest_before
+
+    def test_missing_id_error_is_deterministic(self):
+        """Repeated missing-ID failures produce identical error messages."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+            {"attempt_id": "ATT-000002", "optimizer_recommendation": "RETRY_LATER",
+             "authorized_action": "RETRY_LATER"},
+        ])
+        alloc = _make_allocation(entries)
+
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+        ])
+
+        errors = []
+        for _ in range(5):
+            try:
+                evaluate_portfolio_allocation(alloc, outcome_df)
+            except ValueError as e:
+                errors.append(str(e))
+
+        first = errors[0]
+        for err in errors[1:]:
+            assert err == first
+
+    def test_extra_outcome_rows_do_not_alter_evaluation(self):
+        """Extra outcome rows not in allocation do not change evaluation results."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+        ])
+        alloc = _make_allocation(entries)
+
+        # Minimal outcome frame (only allocation IDs)
+        outcome_minimal = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+        ])
+        result_minimal = evaluate_portfolio_allocation(alloc, outcome_minimal)
+
+        # Extended outcome frame with extra rows
+        outcome_extended = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+            {"attempt_id": "ATT-999999", "amount_inr": 5000.0, "recovered": 1},
+            {"attempt_id": "ATT-999998", "amount_inr": 3000.0, "recovered": 0},
+        ])
+        result_extended = evaluate_portfolio_allocation(alloc, outcome_extended)
+
+        # Evaluation metrics for the allocated rows must be identical
+        assert result_minimal["total_evaluated"] == result_extended["total_evaluated"]
+        assert result_minimal["total_recovered"] == result_extended["total_recovered"]
+        assert result_minimal["total_recovered_amount_inr"] == result_extended["total_recovered_amount_inr"]
+        assert result_minimal["evaluated_attempt_ids"] == result_extended["evaluated_attempt_ids"]
+
+    def test_no_silent_row_count_reduction(self):
+        """total_evaluated equals the number of allocation entries."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": f"ATT-{i:06d}", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"}
+            for i in range(5)
+        ])
+        alloc = _make_allocation(entries)
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": f"ATT-{i:06d}", "amount_inr": 1000.0, "recovered": i % 2}
+            for i in range(5)
+        ])
+
+        result = evaluate_portfolio_allocation(alloc, outcome_df)
+        assert result["total_evaluated"] == len(entries)
+
     def test_empty_outcome_frame_rejection(self):
         """Empty outcome frame raises ValueError."""
         entries = _make_portfolio_entries([
@@ -620,6 +807,41 @@ class TestErrorHandling:
 
         with pytest.raises(ValueError):
             evaluate_portfolio_allocation(alloc, outcome_df)
+
+    def test_allocation_digest_unchanged_after_duplicate_id_failure(self):
+        """Allocation digest remains unchanged when validation fails due to duplicate IDs."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+        ])
+        alloc = _make_allocation(entries)
+        digest_before = _allocation_digest(alloc)
+
+        outcome_df = pd.DataFrame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+            {"attempt_id": "ATT-000001", "amount_inr": 2000.0, "recovered": 0},
+        ])
+
+        with pytest.raises(ValueError):
+            evaluate_portfolio_allocation(alloc, outcome_df)
+
+        assert _allocation_digest(alloc) == digest_before
+
+    def test_allocation_digest_unchanged_after_successful_evaluation(self):
+        """Allocation digest remains unchanged after successful evaluation."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+        ])
+        alloc = _make_allocation(entries)
+        digest_before = _allocation_digest(alloc)
+
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+        ])
+
+        _ = evaluate_portfolio_allocation(alloc, outcome_df)
+        assert _allocation_digest(alloc) == digest_before
 
 
 # =============================================================================
@@ -773,7 +995,7 @@ class TestLabelDiscipline:
     """Tests verifying output fields carry required label discipline."""
 
     def test_model_estimate_labels_present(self):
-        """Evaluation output contains MODEL ESTIMATE labels where appropriate."""
+        """Evaluation output contains comparison labels where appropriate."""
         entries = _make_portfolio_entries([
             {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
              "authorized_action": "RETRY_NOW"},
@@ -785,12 +1007,11 @@ class TestLabelDiscipline:
 
         result = evaluate_portfolio_allocation(alloc, outcome_df)
 
-        # Check that model estimate labels exist in comparisons
+        # Check that comparison labels exist
         comparisons = result.get("comparisons", {})
-        for comp_type in ["confounded", "unconfounded"]:
+        for comp_type in ["confounded", "observational"]:
             comp = comparisons.get(comp_type, {})
             if comp:
-                # Should have labeled metrics
                 assert "label" in comp
 
     def test_observed_simulated_outcome_labels(self):
@@ -808,3 +1029,21 @@ class TestLabelDiscipline:
 
         # The result should distinguish model estimates from observed outcomes
         assert "realized" in result or "observed" in result or "total_recovered" in result
+
+    def test_observational_label_not_unconfounded(self):
+        """The comparison label must say OBSERVATIONAL, not UNCONFOUNDED."""
+        entries = _make_portfolio_entries([
+            {"attempt_id": "ATT-000001", "optimizer_recommendation": "RETRY_NOW",
+             "authorized_action": "RETRY_NOW"},
+        ])
+        alloc = _make_allocation(entries)
+        outcome_df = _make_outcome_frame([
+            {"attempt_id": "ATT-000001", "amount_inr": 1000.0, "recovered": 1},
+            {"attempt_id": "ATT-000002", "amount_inr": 2000.0, "recovered": 0,
+             "assigned_action": "CONTROL"},
+        ])
+
+        result = evaluate_portfolio_allocation(alloc, outcome_df)
+        label = result["comparisons"]["observational"]["label"]
+        assert "OBSERVATIONAL" in label
+        assert "UNCONFOUNDED" not in label
