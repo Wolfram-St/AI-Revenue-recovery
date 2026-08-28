@@ -587,6 +587,31 @@ class TestCandidateConstruction:
         assert "ATT-000001" in entries2
         assert entries2["ATT-000001"].no_intervention_reason == "invalid_prediction"
 
+    def test_non_default_dataframe_index(self):
+        """build_candidate_universe works correctly with non-zero-based DataFrame index.
+
+        Regression test for the pos_idx fix: after chronological_split the test
+        DataFrame has a non-zero-based index (e.g. starting at 4250). The old code
+        used the DataFrame index as a positional index into probs_df, which caused
+        IndexError. The fix uses enumerate() to track positional index.
+        """
+        # Create frame with non-zero-based index (simulates post-split frame)
+        frame = self.base_frame.copy()
+        frame.index = range(1000, 1000 + len(frame))
+
+        bundle = self._make_mock_bundle({
+            "CONTROL": 0.3, "RETRY_NOW": 0.8, "RETRY_LATER": 0.6,
+            "REQUEST_UPDATE": 0.5, "HUMAN_REVIEW": 0.7,
+        })
+
+        candidates, entries, metadata = build_candidate_universe(frame, bundle, self.policy)
+
+        # Should not raise IndexError
+        assert len(candidates) > 0 or len(entries) > 0
+        # All attempt_ids should be accounted for
+        all_ids = {c.attempt_id for c in candidates} | set(entries.keys())
+        assert all_ids == {f"ATT-{i:06d}" for i in range(1, 4)}
+
 
 class TestCandidateRanking:
     """Tests for Task 3: deterministic global-pair ranking."""
