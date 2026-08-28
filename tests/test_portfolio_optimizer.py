@@ -579,3 +579,108 @@ class TestCandidateConstruction:
         candidates2, entries2, metadata2 = build_candidate_universe(self.base_frame, bundle2, self.policy)
         assert "ATT-000001" in entries2
         assert entries2["ATT-000001"].no_intervention_reason == "invalid_prediction"
+
+
+class TestCandidateRanking:
+    """Tests for Task 3: deterministic global-pair ranking."""
+
+    def _make_candidates(self, candidate_data):
+        """Helper to create CandidatePair objects for testing."""
+        from ml.portfolio_optimizer import CandidatePair
+        candidates = []
+        for i, data in enumerate(candidate_data):
+            candidates.append(CandidatePair(
+                attempt_id=data.get("attempt_id", f"ATT-{i:06d}"),
+                payment_id=data.get("payment_id", f"PAY-{i:06d}"),
+                row_index=data.get("row_index", i),
+                arm=data["arm"],
+                gross_incremental_value_inr=data.get("gross_incremental_value_inr", 100.0),
+                action_cost_inr=data.get("action_cost_inr", 10.0),
+                action_cost_paise=data.get("action_cost_paise", 1000),
+                net_incremental_value_inr=data["net_incremental_value_inr"],
+                p_hat_arm=data.get("p_hat_arm", 0.5),
+                p_hat_control=data.get("p_hat_control", 0.3),
+            ))
+        return candidates
+
+    def test_primary_sort_net_value_descending(self):
+        """Higher net_incremental_value_inr ranked earlier."""
+        from ml.portfolio_optimizer import sort_key_candidate_pair, rank_candidate_pairs
+        
+        candidates = self._make_candidates([
+            {"arm": "RETRY_NOW", "net_incremental_value_inr": 100.0},
+            {"arm": "RETRY_LATER", "net_incremental_value_inr": 300.0},
+            {"arm": "REQUEST_UPDATE", "net_incremental_value_inr": 200.0},
+        ])
+        
+        ranked = rank_candidate_pairs(candidates)
+        
+        assert ranked[0].net_incremental_value_inr == 300.0
+        assert ranked[1].net_incremental_value_inr == 200.0
+        assert ranked[2].net_incremental_value_inr == 100.0
+
+    def test_secondary_sort_attempt_id_ascending(self):
+        """Equal net values broken deterministically by attempt_id ascending."""
+        from ml.portfolio_optimizer import rank_candidate_pairs
+        
+        candidates = self._make_candidates([
+            {"attempt_id": "ATT-000003", "arm": "RETRY_NOW", "net_incremental_value_inr": 200.0},
+            {"attempt_id": "ATT-000001", "arm": "RETRY_LATER", "net_incremental_value_inr": 200.0},
+            {"attempt_id": "ATT-000002", "arm": "REQUEST_UPDATE", "net_incremental_value_inr": 200.0},
+        ])
+        
+        ranked = rank_candidate_pairs(candidates)
+        
+        assert ranked[0].attempt_id == "ATT-000001"
+        assert ranked[1].attempt_id == "ATT-000002"
+        assert ranked[2].attempt_id == "ATT-000003"
+
+    def test_tertiary_sort_arm_order_ascending(self):
+        """Same row with equal net values across multiple arms broken by ARM_ORDER index."""
+        from ml.portfolio_optimizer import rank_candidate_pairs
+        from ml.action_model import ARM_ORDER
+        
+        # Same attempt_id, same net value, different arms
+        candidates = self._make_candidates([
+            {"attempt_id": "ATT-000001", "arm": "HUMAN_REVIEW", "net_incremental_value_inr": 100.0},
+            {"attempt_id": "ATT-000001", "arm": "RETRY_NOW", "net_incremental_value_inr": 100.0},
+            {"attempt_id": "ATT-000001", "arm": "REQUEST_UPDATE", "net_incremental_value_inr": 100.0},
+            {"attempt_id": "ATT-000001", "arm": "RETRY_LATER", "net_incremental_value_inr": 100.0},
+        ])
+        
+        ranked = rank_candidate_pairs(candidates)
+        
+        # ARM_ORDER: RETRY_NOW(1), RETRY_LATER(2), REQUEST_UPDATE(3), HUMAN_REVIEW(4)
+        assert ranked[0].arm == "RETRY_NOW"
+        assert ranked[1].arm == "RETRY_LATER"
+        assert ranked[2].arm == "REQUEST_UPDATE"
+        assert ranked[3].arm == "HUMAN_REVIEW"
+
+    def test_ranking_permutation_invariance(self):
+        """Shuffling input candidate list produces byte-identical sorted output."""
+        from ml.portfolio_optimizer import rank_candidate_pairs
+        import random
+        
+        base_candidates = self._make_candidates([
+            {"attempt_id": "ATT-000001", "arm": "RETRY_NOW", "net_incremental_value_inr": 300.0},
+            {"attempt_id": "ATT-000002", "arm": "RETRY_LATER", "net_incremental_value_inr": 200.0},
+            {"attempt_id": "ATT-000001", "arm": "HUMAN_REVIEW", "net_incremental_value_inr": 100.0},
+            {"attempt_id": "ATT-000003", "arm": "REQUEST_UPDATE", "net_incremental_value_inr": 400.0},
+        ])
+        
+        # Rank multiple times with shuffled input
+        results = []
+        for _ in range(10):
+            shuffled = base_candidates.copy()
+            random.shuffle(shuffled)
+            ranked = rank_candidate_pairs(shuffled)
+            results.append(tuple((c.attempt_id, c.arm, c.net_incremental_value_inr) for c in ranked))
+        
+        # All results should be identical
+        assert all(r == results[0] for r in results)
+        
+        # Verify correct order: highest net value first
+        assert results[0][0] == ("ATT-000003", "REQUEST_UPDATE", 400.0)
+        assert results[0][1] == ("ATT-000001", "RETRY_NOW", 300.0)
+        assert results[0][2] == ("ATT-000002", "RETRY_LATER", 200.0)
+        assert results[0][3] == ("ATT-000001", "HUMAN_REVIEW", 100.0)

@@ -1,12 +1,13 @@
-"""Day 7 portfolio optimizer interfaces and contracts (Task 1 & 2).
+"""Day 7 portfolio optimizer interfaces and contracts (Task 1, 2, & 3).
 
-Frozen dataclasses, exceptions, constants, candidate construction, and JSON serialization
+Frozen dataclasses, exceptions, constants, candidate construction, ranking, and JSON serialization
 specification for the bounded recovery portfolio optimizer.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -406,3 +407,31 @@ class CandidatePair:
     net_incremental_value_inr: float
     p_hat_arm: float
     p_hat_control: float
+
+
+# ARM_ORDER index mapping for deterministic tie-breaking
+_ARM_ORDER_INDEX = {arm: idx for idx, arm in enumerate(ARM_ORDER)}
+
+
+def sort_key_candidate_pair(candidate: CandidatePair) -> tuple[float, str, int]:
+    """Return 3-level key: (-net_incremental_value_inr, attempt_id, ARM_ORDER_index).
+    
+    Sort order:
+    1. Primary: net_incremental_value_inr descending (higher value first)
+    2. Secondary: attempt_id ascending (lexicographic)
+    3. Tertiary: ARM_ORDER index ascending (RETRY_NOW < RETRY_LATER < REQUEST_UPDATE < HUMAN_REVIEW)
+    """
+    return (
+        -candidate.net_incremental_value_inr,
+        candidate.attempt_id,
+        _ARM_ORDER_INDEX.get(candidate.arm, 999),
+    )
+
+
+def rank_candidate_pairs(candidates: Sequence[CandidatePair]) -> tuple[CandidatePair, ...]:
+    """Sort candidates deterministically by net_incremental_value_inr desc, attempt_id asc, ARM_ORDER asc.
+    
+    Pure function. Input: sequence of CandidatePair. Output: sorted tuple of CandidatePair.
+    Zero random or clock reads. Identical input produces identical output.
+    """
+    return tuple(sorted(candidates, key=sort_key_candidate_pair))
