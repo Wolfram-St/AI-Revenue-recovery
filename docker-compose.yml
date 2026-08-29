@@ -1,20 +1,4 @@
 services:
-  app:
-    build: .
-    image: recoverai-app
-    environment:
-      DATABASE_URL: postgresql://recoverai:recoverai@db:5432/recoverai
-      POSTGRES_HOST: db
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: recoverai
-      POSTGRES_USER: recoverai
-      POSTGRES_PASSWORD: recoverai
-    volumes:
-      - .:/app
-    depends_on:
-      db:
-        condition: service_healthy
-
   db:
     image: postgres:16-alpine
     environment:
@@ -31,6 +15,29 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      DATABASE_URL: postgresql://recoverai:recoverai@db:5432/recoverai
+      DEMO_MODE: "true"
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000","http://localhost:80"]'
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
 
 volumes:
   pgdata:
