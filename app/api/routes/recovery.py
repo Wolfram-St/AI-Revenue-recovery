@@ -1,12 +1,14 @@
 """Recovery agent API routes.
 
-Exposes the recovery agent pipeline and webhook ingestion via HTTP endpoints:
+Exposes the recovery agent pipeline, webhook ingestion, and Promise-to-Pay (PTP) tracker via HTTP:
 
 - ``POST /api/recovery/run`` — run the agent on synthetic or live data
 - ``GET  /api/recovery/status`` — current agent status and audit summary
 - ``GET  /api/recovery/audit`` — full audit trail
 - ``POST /api/recovery/simulate`` — run with configurable synthetic failures
 - ``POST /api/recovery/webhook`` — ingest real-time Razorpay webhooks
+- ``POST /api/recovery/ptp/register`` — register a customer Promise-to-Pay
+- ``GET  /api/recovery/ptp/cases/{case_id}`` — retrieve active PTP for a case
 """
 
 from __future__ import annotations
@@ -33,6 +35,15 @@ from recovery.razorpay_client import (
     RazorpayAPIError,
     WebhookEvent,
     parse_webhook,
+)
+from recovery.ptp_tracker import (
+    PTPChannel,
+    PTPStatus,
+    PromiseToPay,
+    default_ptp_registry,
+    fulfill_promise,
+    register_promise,
+    should_pause_dunning,
 )
 
 router = APIRouter(prefix="/api/recovery", tags=["recovery"])
@@ -88,6 +99,20 @@ class WebhookIngestResponse(BaseModel):
     amount_inr: float
     classification: dict[str, Any] | None = None
     recommended_action: dict[str, Any] | None = None
+    ptp_fulfillment: dict[str, Any] | None = None
+
+
+class PTPRegisterRequest(BaseModel):
+    """Request body for ``POST /api/recovery/ptp/register``."""
+
+    recovery_case_id: str = Field(description="Associated recovery case ID")
+    customer_id: str = Field(description="Customer ID")
+    promised_amount_inr: float = Field(gt=0, description="Promised amount in INR")
+    promised_date: str = Field(description="Promised date ISO string (UTC)")
+    channel_source: str = Field(default="VOICE_AGENT", description="Channel where promise was negotiated")
+    grace_period_hours: int = Field(default=4, ge=0, description="Grace period in hours")
+    concession_applied: dict[str, Any] = Field(default_factory=dict, description="Applied concession or waiver details")
+    transcript_snippet: str | None = Field(default=None, description="Transcript snippet capturing consent")
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +155,7 @@ def get_status() -> RecoveryStatusResponse:
 
 @router.post("/simulate")
 def run_simulation(req: SimulateRequest) -> dict[str, Any]:
-    """Run the recovery agent on synthetic data.
-
-    No Razorpay credentials needed — this generates realistic failure
-    scenarios and runs the full pipeline in simulation mode.
-    """
+    """Run the recovery agent on synthetic data."""
     global _agent, _last_result
 
     config = AgentConfig(
@@ -152,11 +173,7 @@ def run_simulation(req: SimulateRequest) -> dict[str, Any]:
 
 @router.post("/run")
 def run_live(req: RunLiveRequest) -> dict[str, Any]:
-    """Run the recovery agent on live Razorpay data.
-
-    Requires ``RAZORPAY_KEY_ID`` and ``RAZORPAY_KEY_SECRET`` environment
-    variables. If not configured, returns a 500 error with instructions.
-    """
+    """Run the recovery agent on live Razorpay data."""
     global _agent, _last_result
 
     try:
@@ -197,7 +214,7 @@ async def ingest_webhook(
 
     Verifies the HMAC-SHA256 signature against ``RAZORPAY_WEBHOOK_SECRET``,
     parses the event payload, diagnoses root cause on payment failures, and
-    determines the recovery action.
+    fulfills active Promise-to-Pay commitments on payment capture.
     """
     raw_body = await request.body()
     webhook_secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "").strip() or None
@@ -214,7 +231,9 @@ async def ingest_webhook(
 
     classification_dict = None
     action_dict = None
+    ptp_dict = None
 
+    # Handle Payment Failure
     if event.event == "payment.failed" and event.entity_type == "payment":
         payment_dict = event.raw_payload.get("payload", {}).get("payment", {}).get("entity", {})
         classification = classify_failure(payment_dict)
@@ -239,6 +258,22 @@ async def ingest_webhook(
             "estimated_cost_paise": action.estimated_cost_paise,
         }
 
+    # Handle Successful Payment Capture (PTP fulfillment check)
+    elif event.event in ("payment.captured", "payment.authorized") and event.entity_type == "payment":
+        amount_inr = event.amount_paise / 100.0
+        if event.customer_id:
+            active_ptps = default_ptp_registry.get_active_by_customer(event.customer_id)
+            for p in active_ptps:
+                if amount_inr >= p.promised_amount_inr:
+                    fulfilled = fulfill_promise(p, amount_inr)
+                    default_ptp_registry.register(fulfilled)
+                    ptp_dict = {
+                        "ptp_id": fulfilled.ptp_id,
+                        "status": fulfilled.status.value,
+                        "fulfilled_at": fulfilled.fulfilled_at,
+                    }
+                    break
+
     return WebhookIngestResponse(
         status="processed",
         event=event.event,
@@ -247,4 +282,36 @@ async def ingest_webhook(
         amount_inr=event.amount_paise / 100.0,
         classification=classification_dict,
         recommended_action=action_dict,
+        ptp_fulfillment=ptp_dict,
     )
+
+
+# ---------------------------------------------------------------------------
+# Promise-to-Pay (PTP) Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/ptp/register")
+def register_ptp_endpoint(req: PTPRegisterRequest) -> dict[str, Any]:
+    """Register a new customer Promise-to-Pay commitment."""
+    channel = PTPChannel(req.channel_source) if req.channel_source in PTPChannel.__members__ else PTPChannel.VOICE_AGENT
+    ptp = register_promise(
+        recovery_case_id=req.recovery_case_id,
+        customer_id=req.customer_id,
+        promised_amount_inr=req.promised_amount_inr,
+        promised_date=req.promised_date,
+        channel_source=channel,
+        grace_period_hours=req.grace_period_hours,
+        concession_applied=req.concession_applied,
+        transcript_snippet=req.transcript_snippet,
+    )
+    default_ptp_registry.register(ptp)
+    return ptp.to_dict()
+
+
+@router.get("/ptp/cases/{case_id}")
+def get_case_ptp(case_id: str) -> dict[str, Any]:
+    """Retrieve active or latest Promise-to-Pay record for a case."""
+    ptp = default_ptp_registry.get_by_case(case_id)
+    if ptp is None:
+        raise HTTPException(status_code=404, detail=f"No Promise-to-Pay found for case {case_id}")
+    return ptp.to_dict()
