@@ -4,6 +4,7 @@ const navItems = [
   { path: '/', label: 'Dashboard' },
   { path: '/cases', label: 'Recovery Cases' },
   { path: '/portfolio', label: 'Portfolio Optimizer' },
+  { path: '/recovery-agent', label: 'Recovery Agent' },
 ];
 
 export default function Layout() {
