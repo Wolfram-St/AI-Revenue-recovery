@@ -7,6 +7,10 @@ the dependency layer to maintain the unidirectional dependency rule.
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env before anything reads os.environ
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -30,6 +34,7 @@ from app.api.routes.cases import router as cases_router
 from app.api.routes.analysis import router as analysis_router
 from app.api.routes.portfolio import router as portfolio_router
 from app.api.routes.audit import router as audit_router
+from app.api.routes.recovery import router as recovery_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -65,5 +70,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(analysis_router)
     app.include_router(portfolio_router)
     app.include_router(audit_router)
+    app.include_router(recovery_router)
 
     return app
+
+
+# Module-level app for uvicorn: `uvicorn app.main:app`
+app = create_app()

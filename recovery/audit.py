@@ -301,3 +301,31 @@ def trace_to_dict(trace: DecisionTrace) -> dict:
 def traces_to_json(traces: Sequence[DecisionTrace]) -> str:
     """Serialize traces deterministically; identical inputs yield identical bytes."""
     return json.dumps([trace_to_dict(trace) for trace in traces], sort_keys=False)
+
+
+def build_sql_insert_for_decision_trace(trace: DecisionTrace) -> tuple[str, tuple[Any, ...]]:
+    """Generate parameterised SQL INSERT for a DecisionTrace matching audit_logs in db/schema.sql."""
+    query = """
+    INSERT INTO audit_logs (
+        recovery_case_id,
+        event_type,
+        actor_type,
+        action,
+        decision_reason,
+        event_payload,
+        created_at
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s);
+    """.strip()
+
+    payload_json = json.dumps(trace_to_dict(trace))
+    params = (
+        trace.attempt_id,
+        "DECISION_RECORDED",
+        "POLICY_ENGINE" if trace.matched_rule_id else "RECOVERY_ENGINE",
+        trace.authorized_action,
+        trace.authorization_reason,
+        payload_json,
+        trace.event_timestamp,
+    )
+    return query, params
+

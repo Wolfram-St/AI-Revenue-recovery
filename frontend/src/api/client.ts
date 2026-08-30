@@ -7,6 +7,9 @@ import type {
   PortfolioRequest,
   PortfolioResponse,
   AuditResponse,
+  RecoveryStatusResponse,
+  RecoveryAuditEntry,
+  RecoverySimulateRequest,
 } from '../types/api';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -61,4 +64,12 @@ export const api = {
     const qs = searchParams.toString();
     return fetchJson<AuditResponse>(`/api/audit${qs ? `?${qs}` : ''}`);
   },
+  // ── Recovery Agent ──────────────────────────────────────────────────
+  recoveryStatus: () => fetchJson<RecoveryStatusResponse>('/api/recovery/status'),
+  recoverySimulate: (req?: RecoverySimulateRequest) =>
+    fetchJson<RecoveryStatusResponse>('/api/recovery/simulate', {
+      method: 'POST',
+      body: JSON.stringify(req ?? {}),
+    }),
+  recoveryAudit: () => fetchJson<RecoveryAuditEntry[]>('/api/recovery/audit'),
 };
