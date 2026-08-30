@@ -163,3 +163,68 @@ export interface ErrorResponse {
     message: string;
   };
 }
+
+// ── Recovery Agent ─────────────────────────────────────────────────────
+
+export interface RecoveryActionDist {
+  action: string;
+  count: number;
+}
+
+export interface RecoveryCategoryDist {
+  category: string;
+  count: number;
+}
+
+export interface RecoveryAuditSummary {
+  total_entries: number;
+  total_amount_inr: number;
+  total_recovered_inr: number;
+  recovery_rate_pct: number;
+  success_rate_pct: number;
+  action_distribution: RecoveryActionDist[];
+  category_distribution: RecoveryCategoryDist[];
+}
+
+export interface RecoveryStatusResponse {
+  mode: string;
+  total_processed: number;
+  total_amount_inr: number;
+  recovered_count: number;
+  recovered_inr: number;
+  recovery_rate_pct: number;
+  escalated_count: number;
+  stopped_count: number;
+  budget_used_inr: number;
+  budget_remaining_inr: number;
+  audit_summary: RecoveryAuditSummary;
+}
+
+export interface RecoveryAuditEntry {
+  entry_id: string;
+  payment_id: string;
+  subscription_id: string;
+  amount_paise: number;
+  failure_category: string;
+  classification_confidence: number;
+  classification_reason: string;
+  raw_error_code: string;
+  raw_error_reason: string;
+  action_type: string;
+  strategy_reason: string;
+  retry_count: number;
+  estimated_cost_paise: number;
+  execution_success: boolean;
+  new_order_id: string;
+  execution_message: string;
+  execution_error: string;
+  cost_paise: number;
+  created_at: number;
+  cycle_duration_ms: number;
+}
+
+export interface RecoverySimulateRequest {
+  count?: number;
+  budget_limit_inr?: number;
+  max_retries?: number;
+}

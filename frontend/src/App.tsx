@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard';
 import RecoveryCases from './pages/RecoveryCases';
 import CaseDetail from './pages/CaseDetail';
 import PortfolioOptimizer from './pages/PortfolioOptimizer';
+import RecoveryAgent from './pages/RecoveryAgent';
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
           <Route path="/cases" element={<RecoveryCases />} />
           <Route path="/cases/:caseId" element={<CaseDetail />} />
           <Route path="/portfolio" element={<PortfolioOptimizer />} />
+          <Route path="/recovery-agent" element={<RecoveryAgent />} />
         </Route>
       </Routes>
     </BrowserRouter>
