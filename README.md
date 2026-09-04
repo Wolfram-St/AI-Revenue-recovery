@@ -419,4 +419,4 @@ tests/test_policy_engine.py ................................ PASSED
 ---
 
 ## License & Attribution
-Developed for the **Razorpay AI Buildathon 2026** by Team RecoverAI. Distributed under the MIT License.
+Distributed under the MIT License.
